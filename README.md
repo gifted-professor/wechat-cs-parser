@@ -79,7 +79,50 @@ python3 -m wechat_cs build-action-queue \
 
 所有接口只返回匿名 `customer_key`，并固定返回 `send_allowed=false`。
 
-## 4. Plan 7 人工复核
+## 4. Kimi 50 人销售画像试点（离线、仅审核）
+
+先备份 run 数据库，再从 Dashboard 的只读快照导入最新订单和会员事实，然后冻结 50 人名单。所有命令必须使用创建该 run 时相同的 `WECHAT_CS_HMAC_SECRET`。`prepare-sales-profile-pilot` 默认固定使用 run `20260713T140730+0800-833c3257`、截止时间 `2026-07-13T20:14:37+08:00` 和模型 `kimi-k2.6`；该步骤不会调用 Kimi。
+
+```bash
+python3 -m wechat_cs import-orders \
+  --db /absolute/path/to/run.sqlite3 \
+  --orders /absolute/path/to/orders_live.json
+python3 -m wechat_cs import-member-facts \
+  --db /absolute/path/to/run.sqlite3 \
+  --members /absolute/path/to/birthday_members.json
+python3 -m wechat_cs prepare-sales-profile-pilot \
+  --db /absolute/path/to/run.sqlite3
+```
+
+人工确认冻结结果后，才配置密钥并生成画像。生成命令只处理已冻结名单；单客失败不会阻断其余客户，`--resume` 只用于续跑失败项。
+
+```bash
+export KIMI_API_KEY='Kimi 开放平台 Key'
+python3 -m wechat_cs run-sales-profile-pilot \
+  --db /absolute/path/to/run.sqlite3 \
+  --events /absolute/path/to/events.jsonl \
+  --accounts-config /absolute/path/to/accounts.local.json \
+  --run-id latest \
+  --concurrency 2
+
+# 修复数据或服务问题后续跑失败项
+python3 -m wechat_cs run-sales-profile-pilot \
+  --db /absolute/path/to/run.sqlite3 \
+  --events /absolute/path/to/events.jsonl \
+  --accounts-config /absolute/path/to/accounts.local.json \
+  --run-id latest \
+  --resume
+```
+
+试点结果只进入“50 人画像验收”，不写回客户记忆，也没有自动发送能力。每张历史画像都必须在联系前核对最新状态。
+
+审核页面只使用以下接口：
+
+- `GET /v1/sales-profile-pilot?run_id=latest&status=&stratum=&limit=&offset=`
+- `GET /v1/sales-profile-pilot/{sales_profile_id}`
+- `POST /v1/sales-profile-pilot/{sales_profile_id}/review`
+
+## 5. Plan 7 人工复核
 
 三个批次必须依次完成，后续阶段不会越过前一阶段：
 
@@ -95,7 +138,7 @@ python3 -m wechat_cs review-annotate \
 
 阶段名依次为 `protocol_20`、`acceptance_100`、`gold_500`。人工复核可以看到独立标记的实际回复，模型载荷会剔除它；付款、订单和结果字段不会被复核查询读取。
 
-## 5. 角色校准和样本审核
+## 6. 角色校准和样本审核
 
 角色校准必须完成全部 200 条且准确率达到 99%，之后才能安全导出训练集。审核通过的低风险风格样本才会进入起草检索。
 
@@ -108,13 +151,13 @@ python3 -m wechat_cs export-chatml \
 
 不要使用 `--include-pending`、`--allow-unverified-roles` 或 `--include-risky` 生成生产训练集；这些参数只用于隔离研究。
 
-## 6. 飞书知识缓存
+## 7. 飞书知识缓存
 
 复制并编辑 `config/knowledge_sources.example.json`。当前服务读取本地缓存文件，不会在请求时直接把整份飞书文档拉入模型。每个缓存需要包含采集时间和可检索条目；缺失或过期会显示在系统状态中。
 
 动态价格、库存、物流、退款或补发问题没有有效依据时，起草结果会带 `grounding_missing`、`needs_clarification` 和 `needs_human`。
 
-## 7. 安装到现有远端 Dashboard
+## 8. 安装到现有远端 Dashboard
 
 先在 Dashboard 主机上只做兼容性检查：
 
@@ -141,7 +184,7 @@ export WECHAT_CS_DASHBOARD_TOKEN='至少 32 字符的独立操作员令牌'
 export WECHAT_CS_PRIVATE_MAP_PATH='/仅本机可读/customer-map.json'
 ```
 
-浏览器只访问 `/api/wechat-cs/*`，并在系统页输入独立操作员令牌。解析服务令牌由 Dashboard 代理注入，不进入页面脚本。代理只允许上述四个行动接口和 `/health`，不会转发客户聊天、旧草稿或审核接口。
+浏览器只访问 `/api/wechat-cs/*`，并在系统页输入独立操作员令牌。解析服务令牌由 Dashboard 代理注入，不进入页面脚本。代理精确允许上述四个行动接口、三个销售画像查询/审核接口和 `/health`；不会转发客户聊天、旧草稿，也不会开放模型触发或发送接口。
 
 私有映射只接受 `display_name`、`owner`、`account_label` 和不含联系方式的通用 `contact_hint`；不要写入手机号、微信号、raw ID 或 HMAC。若 API 绑定通配地址，还必须设置 `WECHAT_CS_ALLOWED_HOSTS`；优先直接绑定本机或 Tailscale IP。
 
@@ -149,7 +192,7 @@ export WECHAT_CS_PRIVATE_MAP_PATH='/仅本机可读/customer-map.json'
 
 回滚时停止 Dashboard，恢复两个 `.before-wechat-cs` 备份，并移除 `wechat_cs_proxy.js` 与 `wechat-cs/` 目录。
 
-## 8. 验证
+## 9. 验证
 
 ```bash
 python3 -m py_compile wechat_cs/*.py

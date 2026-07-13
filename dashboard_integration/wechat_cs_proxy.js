@@ -48,8 +48,18 @@ function isAllowedActionRoute(method, suffix) {
   if (method === 'GET' && (suffix === '/health' || suffix === '/action-queue')) return true;
   const detail = /^\/action-queue\/[A-Za-z0-9_.:-]{1,160}$/.test(suffix);
   if (method === 'GET' && detail) return true;
+  if (method === 'POST'
+    && /^\/action-queue\/[A-Za-z0-9_.:-]{1,160}\/(?:draft|feedback)$/.test(suffix)) return true;
+
+  if (method === 'GET' && suffix === '/sales-profile-pilot') return true;
+  const profileDetail = suffix.match(/^\/sales-profile-pilot\/([A-Za-z0-9_.:-]{1,160})$/);
+  if (method === 'GET' && profileDetail && !['run', 'send'].includes(profileDetail[1].toLowerCase())) {
+    return true;
+  }
+  const profileReview = suffix.match(/^\/sales-profile-pilot\/([A-Za-z0-9_.:-]{1,160})\/review$/);
   return method === 'POST'
-    && /^\/action-queue\/[A-Za-z0-9_.:-]{1,160}\/(?:draft|feedback)$/.test(suffix);
+    && Boolean(profileReview)
+    && !['run', 'send'].includes(profileReview[1].toLowerCase());
 }
 
 function loadPrivateMap() {

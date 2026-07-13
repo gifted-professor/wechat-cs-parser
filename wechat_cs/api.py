@@ -17,8 +17,6 @@ import os
 import re
 import sqlite3
 import threading
-import urllib.error
-import urllib.request
 import uuid
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -27,6 +25,12 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from .core import redact_text
+from .kimi_client import (
+    KimiClientError,
+    KimiInvalidJsonError,
+    KimiJsonClient,
+    KimiSchemaError,
+)
 from .knowledge import KnowledgeRegistry
 from .store import get_health as get_store_health
 
@@ -45,6 +49,29 @@ MAX_BODY_BYTES = 1024 * 1024
 DEFAULT_LIMIT = 50
 MAX_LIMIT = 200
 STALE_AFTER_DAYS = 14
+
+SALES_PROFILE_DEFAULT_LIMIT = 50
+SALES_PROFILE_MAX_LIMIT = 100
+SALES_PROFILE_STRATA = (
+    "complex_risk",
+    "future_return_wait",
+    "high_frequency",
+    "high_value",
+    "dormant_repeat",
+    "control",
+)
+SALES_PROFILE_FILTER_STATUSES = frozenset(
+    {"pending", "running", "succeeded", "failed", "reviewed", "unreviewed"}
+)
+SALES_PROFILE_REVIEW_VERDICTS = frozenset({"approved", "edited", "rejected"})
+SALES_PROFILE_SCORE_FIELDS = (
+    "fact_accuracy",
+    "insight_usefulness",
+    "sales_realism",
+    "timing_quality",
+    "evidence_quality",
+)
+SALES_PROFILE_CONTACT_WARNING = "联系前核对最新状态"
 
 SAFE_REVIEW_STATUSES = {"pending", "approved", "rejected"}
 SAFE_FEEDBACK_OUTCOMES = {"adopted", "accepted", "edited", "rejected"}
@@ -727,6 +754,75 @@ def _public_style_pair(row: Mapping[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _public_sales_profile_run(row: Mapping[str, Any]) -> Dict[str, Any]:
+    return {
+        "sales_profile_run_id": row.get("sales_profile_run_id"),
+        "source_run_id": row.get("source_run_id"),
+        "as_of_at": row.get("as_of_at"),
+        "status": row.get("status"),
+        "model": row.get("model"),
+        "prompt_version": row.get("prompt_version"),
+        "profile_schema_version": row.get("profile_schema_version"),
+        "sampling_version": row.get("sampling_version"),
+        "counts_json": _parse_json(row.get("counts_json"), {}),
+        "created_at": row.get("created_at"),
+        "started_at": row.get("started_at"),
+        "completed_at": row.get("completed_at"),
+    }
+
+
+def _public_sales_profile_list_item(row: Mapping[str, Any]) -> Dict[str, Any]:
+    review_count = int(row.get("review_count") or 0)
+    return {
+        "sales_profile_id": row.get("sales_profile_id"),
+        "subject_id": row.get("subject_id"),
+        "customer_key": row.get("customer_key"),
+        "display_name": row.get("display_name") or "未命名客户",
+        "profile_id": row.get("profile_id"),
+        "stratum": row.get("stratum"),
+        "stratum_rank": int(row.get("stratum_rank") or 0),
+        "status": row.get("effective_status") or "pending",
+        "subject_status": row.get("subject_status") or "prepared",
+        "card_version": row.get("card_version"),
+        "review_status": "reviewed" if review_count else "unreviewed",
+        "review_count": review_count,
+        "latest_verdict": row.get("latest_verdict"),
+        "updated_at": row.get("updated_at"),
+    }
+
+
+def _public_sales_profile_event(row: Mapping[str, Any]) -> Dict[str, Any]:
+    return {
+        "sales_profile_event_id": row.get("sales_profile_event_id"),
+        "chunk_index": int(row.get("chunk_index") or 0),
+        "event_type": row.get("event_type"),
+        "event_json": _parse_json(row.get("event_json"), {}),
+        "evidence_json": _parse_json(row.get("evidence_json"), []),
+        "confidence": row.get("confidence"),
+        "model": row.get("model"),
+        "prompt_version": row.get("prompt_version"),
+        "input_hash": row.get("input_hash"),
+        "created_at": row.get("created_at"),
+    }
+
+
+def _public_sales_profile_review(row: Mapping[str, Any]) -> Dict[str, Any]:
+    return {
+        "review_id": row.get("review_id"),
+        "sales_profile_id": row.get("sales_profile_id"),
+        "card_version": row.get("card_version"),
+        "verdict": row.get("verdict"),
+        "scores": {
+            field: int(row.get(field) or 0) for field in SALES_PROFILE_SCORE_FIELDS
+        },
+        "corrections": _parse_json(row.get("corrections_json"), {}),
+        "notes": row.get("notes") or "",
+        "reviewer": row.get("reviewer"),
+        "created_at": row.get("created_at"),
+        "updated_at": row.get("updated_at"),
+    }
+
+
 class ApiError(Exception):
     def __init__(self, status: int, code: str, message: str, **extra: Any) -> None:
         super().__init__(message)
@@ -815,6 +911,20 @@ class ApiHandler(BaseHTTPRequestHandler):
 
             if method == "GET" and path == "/v1/health":
                 self._get_health()
+            elif method == "GET" and path == "/v1/sales-profile-pilot":
+                self._get_sales_profile_pilot(query)
+            elif (
+                method == "POST"
+                and path.startswith("/v1/sales-profile-pilot/")
+                and path.endswith("/review")
+            ):
+                sales_profile_id = path[
+                    len("/v1/sales-profile-pilot/") : -len("/review")
+                ].strip("/")
+                self._post_sales_profile_review(sales_profile_id)
+            elif method == "GET" and path.startswith("/v1/sales-profile-pilot/"):
+                sales_profile_id = path[len("/v1/sales-profile-pilot/") :].strip("/")
+                self._get_sales_profile_pilot_item(sales_profile_id)
             elif method == "GET" and path == "/v1/action-queue":
                 self._get_action_queue(query)
             elif method == "GET" and path.startswith("/v1/action-queue/"):
@@ -960,6 +1070,474 @@ class ApiHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    @staticmethod
+    def _require_sales_profile_tables(conn: sqlite3.Connection) -> None:
+        required = {
+            "customers",
+            "sales_profile_runs",
+            "sales_profile_subjects",
+            "sales_profile_events",
+            "sales_profiles",
+            "sales_profile_reviews",
+        }
+        if any(not _table_exists(conn, table) for table in required):
+            raise ApiError(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                "data_unavailable",
+                "50 人销售画像试点尚未生成",
+            )
+
+    def _get_sales_profile_pilot(
+        self, query: Mapping[str, List[str]]
+    ) -> None:
+        unknown = sorted(
+            set(query) - {"run_id", "status", "stratum", "limit", "offset"}
+        )
+        if unknown:
+            raise ApiError(
+                HTTPStatus.BAD_REQUEST,
+                "invalid_query",
+                "销售画像查询参数无效",
+            )
+
+        run_selector = self._query_one(query, "run_id") or "latest"
+        if run_selector != "latest" and (
+            len(run_selector) > 160
+            or not re.fullmatch(r"[A-Za-z0-9_.:+-]+", run_selector)
+        ):
+            raise ApiError(
+                HTTPStatus.BAD_REQUEST,
+                "invalid_run_id",
+                "画像批次标识无效",
+            )
+        status_filter = self._query_one(query, "status")
+        if status_filter and status_filter not in SALES_PROFILE_FILTER_STATUSES:
+            raise ApiError(
+                HTTPStatus.BAD_REQUEST,
+                "invalid_status",
+                "画像状态无效",
+            )
+        stratum = self._query_one(query, "stratum")
+        if stratum and stratum not in SALES_PROFILE_STRATA:
+            raise ApiError(
+                HTTPStatus.BAD_REQUEST,
+                "invalid_stratum",
+                "画像分层无效",
+            )
+        try:
+            limit = int(
+                self._query_one(query, "limit") or SALES_PROFILE_DEFAULT_LIMIT
+            )
+            offset = int(self._query_one(query, "offset") or 0)
+        except ValueError:
+            raise ApiError(
+                HTTPStatus.BAD_REQUEST,
+                "invalid_pagination",
+                "分页参数无效",
+            )
+        if limit < 1 or limit > SALES_PROFILE_MAX_LIMIT or offset < 0:
+            raise ApiError(
+                HTTPStatus.BAD_REQUEST,
+                "invalid_pagination",
+                "分页参数超出范围",
+            )
+
+        with self._db() as conn:
+            self._require_sales_profile_tables(conn)
+            run_select = (
+                "SELECT sales_profile_run_id,source_run_id,as_of_at,status,model,"
+                "prompt_version,profile_schema_version,sampling_version,counts_json,"
+                "created_at,started_at,completed_at FROM sales_profile_runs "
+            )
+            if run_selector == "latest":
+                run_row = conn.execute(
+                    run_select
+                    + "ORDER BY created_at DESC,sales_profile_run_id DESC LIMIT 1"
+                ).fetchone()
+            else:
+                run_row = conn.execute(
+                    run_select + "WHERE sales_profile_run_id=?",
+                    (run_selector,),
+                ).fetchone()
+            if run_row is None:
+                raise ApiError(
+                    HTTPStatus.NOT_FOUND,
+                    "sales_profile_run_not_found",
+                    "画像批次不存在",
+                )
+            run = dict(run_row)
+
+            effective_status = (
+                "COALESCE(p.status,CASE s.status WHEN 'prepared' THEN 'pending' "
+                "ELSE s.status END)"
+            )
+            clauses = ["s.sales_profile_run_id=?"]
+            params: List[Any] = [run["sales_profile_run_id"]]
+            if stratum:
+                clauses.append("s.stratum=?")
+                params.append(stratum)
+            if status_filter in {"pending", "running", "succeeded", "failed"}:
+                clauses.append(effective_status + "=?")
+                params.append(status_filter)
+            elif status_filter == "reviewed":
+                clauses.append(
+                    "EXISTS(SELECT 1 FROM sales_profile_reviews rv "
+                    "WHERE rv.sales_profile_id=p.sales_profile_id)"
+                )
+            elif status_filter == "unreviewed":
+                clauses.append(
+                    "NOT EXISTS(SELECT 1 FROM sales_profile_reviews rv "
+                    "WHERE rv.sales_profile_id=p.sales_profile_id)"
+                )
+            where = " WHERE " + " AND ".join(clauses)
+            joins = (
+                " FROM sales_profile_subjects s "
+                "JOIN customers c ON c.customer_key=s.customer_key "
+                "LEFT JOIN sales_profiles p ON p.subject_id=s.subject_id"
+            )
+            total = int(
+                conn.execute("SELECT COUNT(*)" + joins + where, params).fetchone()[0]
+            )
+            rows = conn.execute(
+                "SELECT p.sales_profile_id,s.subject_id,s.customer_key,c.display_name,"
+                "s.profile_id,s.stratum,s.stratum_rank,s.status AS subject_status,"
+                + effective_status
+                + " AS effective_status,p.card_version,p.updated_at,"
+                "(SELECT COUNT(*) FROM sales_profile_reviews rv "
+                " WHERE rv.sales_profile_id=p.sales_profile_id) AS review_count,"
+                "(SELECT rv.verdict FROM sales_profile_reviews rv "
+                " WHERE rv.sales_profile_id=p.sales_profile_id "
+                " ORDER BY rv.updated_at DESC,rv.review_id DESC LIMIT 1) AS latest_verdict"
+                + joins
+                + where
+                + " ORDER BY CASE s.stratum "
+                "WHEN 'complex_risk' THEN 1 WHEN 'future_return_wait' THEN 2 "
+                "WHEN 'high_frequency' THEN 3 WHEN 'high_value' THEN 4 "
+                "WHEN 'dormant_repeat' THEN 5 WHEN 'control' THEN 6 ELSE 7 END,"
+                "s.stratum_rank,s.subject_id LIMIT ? OFFSET ?",
+                params + [limit, offset],
+            ).fetchall()
+
+        self._send_json(
+            HTTPStatus.OK,
+            {
+                "items": [
+                    _public_sales_profile_list_item(dict(row)) for row in rows
+                ],
+                "total": total,
+                "limit": limit,
+                "offset": offset,
+                "run": _public_sales_profile_run(run),
+                "contact_warning": SALES_PROFILE_CONTACT_WARNING,
+                "send_allowed": False,
+            },
+        )
+
+    def _get_sales_profile_pilot_item(self, sales_profile_id: str) -> None:
+        self._validate_identifier(sales_profile_id, "sales_profile_id")
+        with self._db() as conn:
+            self._require_sales_profile_tables(conn)
+            row = conn.execute(
+                "SELECT p.sales_profile_id,p.subject_id,p.status,p.input_hash,"
+                "p.idempotency_key,p.model,p.prompt_version,p.profile_schema_version,"
+                "p.card_version,p.deterministic_facts_json,p.profile_json,p.evidence_json,"
+                "p.error_code,p.error_json,p.created_at,p.updated_at,"
+                "s.sales_profile_run_id,s.customer_key,c.display_name,s.profile_id,"
+                "s.stratum,s.stratum_rank,s.status AS subject_status,"
+                "r.source_run_id,r.as_of_at,r.status AS run_status,r.model AS run_model,"
+                "r.prompt_version AS run_prompt_version,"
+                "r.profile_schema_version AS run_profile_schema_version,"
+                "r.sampling_version,r.counts_json AS run_counts_json,"
+                "r.created_at AS run_created_at,r.started_at AS run_started_at,"
+                "r.completed_at AS run_completed_at "
+                "FROM sales_profiles p "
+                "JOIN sales_profile_subjects s ON s.subject_id=p.subject_id "
+                "JOIN sales_profile_runs r "
+                "ON r.sales_profile_run_id=s.sales_profile_run_id "
+                "JOIN customers c ON c.customer_key=s.customer_key "
+                "WHERE p.sales_profile_id=?",
+                (sales_profile_id,),
+            ).fetchone()
+            if row is None:
+                raise ApiError(
+                    HTTPStatus.NOT_FOUND,
+                    "sales_profile_not_found",
+                    "销售画像不存在",
+                )
+            item = dict(row)
+            event_rows = conn.execute(
+                "SELECT sales_profile_event_id,chunk_index,event_type,event_json,"
+                "evidence_json,confidence,model,prompt_version,input_hash,created_at "
+                "FROM sales_profile_events WHERE subject_id=? "
+                "AND validation_state='accepted' "
+                "ORDER BY chunk_index,created_at,sales_profile_event_id",
+                (item["subject_id"],),
+            ).fetchall()
+            review_rows = conn.execute(
+                "SELECT review_id,sales_profile_id,card_version,verdict,"
+                "fact_accuracy,insight_usefulness,sales_realism,timing_quality,"
+                "evidence_quality,corrections_json,notes,reviewer,created_at,updated_at "
+                "FROM sales_profile_reviews WHERE sales_profile_id=? "
+                "ORDER BY updated_at DESC,review_id DESC",
+                (sales_profile_id,),
+            ).fetchall()
+
+        profile = {
+            "sales_profile_id": item.get("sales_profile_id"),
+            "subject_id": item.get("subject_id"),
+            "customer_key": item.get("customer_key"),
+            "display_name": item.get("display_name") or "未命名客户",
+            "profile_id": item.get("profile_id"),
+            "stratum": item.get("stratum"),
+            "stratum_rank": int(item.get("stratum_rank") or 0),
+            "status": item.get("status"),
+            "subject_status": item.get("subject_status"),
+            "input_hash": item.get("input_hash"),
+            "idempotency_key": item.get("idempotency_key"),
+            "model": item.get("model"),
+            "prompt_version": item.get("prompt_version"),
+            "profile_schema_version": item.get("profile_schema_version"),
+            "card_version": item.get("card_version"),
+            "deterministic_facts_json": _parse_json(
+                item.get("deterministic_facts_json"), {}
+            ),
+            "profile_json": _parse_json(item.get("profile_json"), {}),
+            "evidence_json": _parse_json(item.get("evidence_json"), []),
+            "error_code": item.get("error_code"),
+            "error_json": _parse_json(item.get("error_json"), {}),
+            "created_at": item.get("created_at"),
+            "updated_at": item.get("updated_at"),
+        }
+        run = {
+            "sales_profile_run_id": item.get("sales_profile_run_id"),
+            "source_run_id": item.get("source_run_id"),
+            "as_of_at": item.get("as_of_at"),
+            "status": item.get("run_status"),
+            "model": item.get("run_model"),
+            "prompt_version": item.get("run_prompt_version"),
+            "profile_schema_version": item.get("run_profile_schema_version"),
+            "sampling_version": item.get("sampling_version"),
+            "counts_json": _parse_json(item.get("run_counts_json"), {}),
+            "created_at": item.get("run_created_at"),
+            "started_at": item.get("run_started_at"),
+            "completed_at": item.get("run_completed_at"),
+        }
+        self._send_json(
+            HTTPStatus.OK,
+            {
+                "profile": profile,
+                "accepted_events": [
+                    _public_sales_profile_event(dict(event)) for event in event_rows
+                ],
+                "reviews": [
+                    _public_sales_profile_review(dict(review))
+                    for review in review_rows
+                ],
+                "run": run,
+                "contact_warning": SALES_PROFILE_CONTACT_WARNING,
+                "send_allowed": False,
+            },
+        )
+
+    def _post_sales_profile_review(self, sales_profile_id: str) -> None:
+        self._validate_identifier(sales_profile_id, "sales_profile_id")
+        body = self._read_json()
+        required_fields = {
+            "card_version",
+            "verdict",
+            "scores",
+            "corrections",
+            "notes",
+            "reviewer",
+        }
+        if set(body) != required_fields:
+            raise ApiError(
+                HTTPStatus.BAD_REQUEST,
+                "invalid_review",
+                "审核参数必须完整且不能包含额外字段",
+            )
+
+        card_version_value = body.get("card_version")
+        if not isinstance(card_version_value, str):
+            raise ApiError(
+                HTTPStatus.BAD_REQUEST,
+                "invalid_card_version",
+                "画像版本无效",
+            )
+        card_version = card_version_value.strip()
+        if not card_version or len(card_version) > 256:
+            raise ApiError(
+                HTTPStatus.BAD_REQUEST,
+                "invalid_card_version",
+                "画像版本无效",
+            )
+        verdict_value = body.get("verdict")
+        if not isinstance(verdict_value, str):
+            raise ApiError(
+                HTTPStatus.BAD_REQUEST,
+                "invalid_verdict",
+                "审核结论无效",
+            )
+        verdict = verdict_value.strip().lower()
+        if verdict not in SALES_PROFILE_REVIEW_VERDICTS:
+            raise ApiError(
+                HTTPStatus.BAD_REQUEST,
+                "invalid_verdict",
+                "审核结论必须是 approved、edited 或 rejected",
+            )
+
+        scores = body.get("scores")
+        if not isinstance(scores, Mapping) or set(scores) != set(
+            SALES_PROFILE_SCORE_FIELDS
+        ):
+            raise ApiError(
+                HTTPStatus.BAD_REQUEST,
+                "invalid_scores",
+                "审核评分字段无效",
+            )
+        normalized_scores: Dict[str, int] = {}
+        for field in SALES_PROFILE_SCORE_FIELDS:
+            value = scores.get(field)
+            if type(value) is not int or value < 1 or value > 5:
+                raise ApiError(
+                    HTTPStatus.BAD_REQUEST,
+                    "invalid_scores",
+                    "审核评分必须是 1 到 5 的整数",
+                )
+            normalized_scores[field] = value
+
+        corrections = body.get("corrections")
+        if not isinstance(corrections, dict):
+            raise ApiError(
+                HTTPStatus.BAD_REQUEST,
+                "invalid_corrections",
+                "修改内容必须是对象",
+            )
+        if verdict == "edited" and not corrections:
+            raise ApiError(
+                HTTPStatus.BAD_REQUEST,
+                "missing_corrections",
+                "修改后通过时必须填写修改内容",
+            )
+        notes_value = body.get("notes")
+        if not isinstance(notes_value, str) or len(notes_value) > 12000:
+            raise ApiError(
+                HTTPStatus.BAD_REQUEST,
+                "invalid_notes",
+                "审核备注无效",
+            )
+        notes = notes_value.strip()
+        reviewer_value = body.get("reviewer")
+        if not isinstance(reviewer_value, str):
+            raise ApiError(
+                HTTPStatus.BAD_REQUEST,
+                "invalid_reviewer",
+                "审核人标识无效",
+            )
+        reviewer = reviewer_value.strip()
+        if (
+            not reviewer
+            or len(reviewer) > 128
+            or any(ord(character) < 32 or ord(character) == 127 for character in reviewer)
+        ):
+            raise ApiError(
+                HTTPStatus.BAD_REQUEST,
+                "invalid_reviewer",
+                "审核人标识无效",
+            )
+
+        now = _iso_now()
+        review_id = "sales_profile_review_" + hashlib.sha256(
+            (sales_profile_id + "\0" + reviewer).encode("utf-8")
+        ).hexdigest()[:32]
+        corrections_json = json.dumps(
+            corrections, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+        )
+        with self.server.db_write_lock:
+            conn = self._db(must_exist=False)
+            try:
+                conn.execute("PRAGMA foreign_keys = ON")
+                conn.execute("BEGIN IMMEDIATE")
+                self._require_sales_profile_tables(conn)
+                profile_row = conn.execute(
+                    "SELECT card_version FROM sales_profiles WHERE sales_profile_id=?",
+                    (sales_profile_id,),
+                ).fetchone()
+                if profile_row is None:
+                    raise ApiError(
+                        HTTPStatus.NOT_FOUND,
+                        "sales_profile_not_found",
+                        "销售画像不存在",
+                    )
+                current_card_version = str(profile_row["card_version"] or "").strip()
+                if not current_card_version:
+                    raise ApiError(
+                        HTTPStatus.CONFLICT,
+                        "profile_not_ready",
+                        "销售画像尚未生成完成，不能审核",
+                    )
+                if not hmac.compare_digest(card_version, current_card_version):
+                    raise ApiError(
+                        HTTPStatus.CONFLICT,
+                        "card_version_conflict",
+                        "画像内容已更新，请刷新后重新审核",
+                    )
+                existing = conn.execute(
+                    "SELECT review_id FROM sales_profile_reviews "
+                    "WHERE sales_profile_id=? AND reviewer=?",
+                    (sales_profile_id, reviewer),
+                ).fetchone()
+                conn.execute(
+                    "INSERT INTO sales_profile_reviews(review_id,sales_profile_id,card_version,"
+                    "verdict,fact_accuracy,insight_usefulness,sales_realism,timing_quality,"
+                    "evidence_quality,corrections_json,notes,reviewer,created_at,updated_at) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+                    "ON CONFLICT(sales_profile_id,reviewer) DO UPDATE SET "
+                    "card_version=excluded.card_version,verdict=excluded.verdict,"
+                    "fact_accuracy=excluded.fact_accuracy,"
+                    "insight_usefulness=excluded.insight_usefulness,"
+                    "sales_realism=excluded.sales_realism,"
+                    "timing_quality=excluded.timing_quality,"
+                    "evidence_quality=excluded.evidence_quality,"
+                    "corrections_json=excluded.corrections_json,notes=excluded.notes,"
+                    "updated_at=excluded.updated_at",
+                    (
+                        review_id,
+                        sales_profile_id,
+                        current_card_version,
+                        verdict,
+                        normalized_scores["fact_accuracy"],
+                        normalized_scores["insight_usefulness"],
+                        normalized_scores["sales_realism"],
+                        normalized_scores["timing_quality"],
+                        normalized_scores["evidence_quality"],
+                        corrections_json,
+                        notes,
+                        reviewer,
+                        now,
+                        now,
+                    ),
+                )
+                stored = conn.execute(
+                    "SELECT review_id,sales_profile_id,card_version,verdict,"
+                    "fact_accuracy,insight_usefulness,sales_realism,timing_quality,"
+                    "evidence_quality,corrections_json,notes,reviewer,created_at,updated_at "
+                    "FROM sales_profile_reviews WHERE sales_profile_id=? AND reviewer=?",
+                    (sales_profile_id, reviewer),
+                ).fetchone()
+                conn.commit()
+            finally:
+                conn.close()
+
+        self._send_json(
+            HTTPStatus.OK if existing is not None else HTTPStatus.CREATED,
+            {
+                "review": _public_sales_profile_review(dict(stored)),
+                "contact_warning": SALES_PROFILE_CONTACT_WARNING,
+                "send_allowed": False,
+            },
+        )
 
     def _get_action_queue(self, query: Mapping[str, List[str]]) -> None:
         unknown = sorted(set(query) - {"profile", "date", "limit"})
@@ -2208,49 +2786,30 @@ class ApiHandler(BaseHTTPRequestHandler):
         }
 
     def _call_kimi(self, messages: Sequence[Mapping[str, str]]) -> Dict[str, Any]:
-        base = os.environ.get("KIMI_BASE_URL", "https://api.moonshot.cn/v1").rstrip("/")
         model = os.environ.get("KIMI_MODEL", "kimi-k2.6")
-        request_payload = {
-            "model": model,
-            "messages": list(messages),
-            "temperature": 0.2,
-            "response_format": {"type": "json_object"},
-        }
-        request = urllib.request.Request(
-            base + "/chat/completions",
-            data=json.dumps(request_payload, ensure_ascii=False).encode("utf-8"),
-            headers={
-                "Authorization": "Bearer " + os.environ["KIMI_API_KEY"].strip(),
-                "Content-Type": "application/json",
-                "User-Agent": "wechat-cs-local/1.0",
-            },
-            method="POST",
-        )
-        timeout = float(os.environ.get("KIMI_TIMEOUT_SECONDS", "45"))
+        configured_timeout = float(os.environ.get("KIMI_TIMEOUT_SECONDS", "45"))
+        timeout = max(5.0, min(configured_timeout, 120.0))
         try:
-            with urllib.request.urlopen(request, timeout=max(5.0, min(timeout, 120.0))) as response:
-                raw = response.read(MAX_BODY_BYTES)
-        except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, OSError):
+            return KimiJsonClient().complete_json(
+                messages,
+                model=model,
+                temperature=0.2,
+                timeout_seconds=timeout,
+            )
+        except (KimiInvalidJsonError, KimiSchemaError):
+            raise ApiError(
+                HTTPStatus.BAD_GATEWAY,
+                "kimi_invalid_response",
+                "Kimi 返回格式异常，未保存草稿",
+                grounding_missing=True,
+            )
+        except KimiClientError:
             raise ApiError(
                 HTTPStatus.BAD_GATEWAY,
                 "kimi_request_failed",
                 "Kimi 暂时不可用，未生成任何模拟回复",
                 grounding_missing=True,
             )
-        try:
-            payload = json.loads(raw.decode("utf-8"))
-            content = payload["choices"][0]["message"]["content"]
-            if isinstance(content, list):
-                content = "".join(str(item.get("text", "")) if isinstance(item, dict) else str(item) for item in content)
-            text = str(content).strip()
-            if text.startswith("```"):
-                text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.IGNORECASE)
-            result = json.loads(text)
-        except (KeyError, IndexError, TypeError, ValueError, UnicodeDecodeError, json.JSONDecodeError):
-            raise ApiError(HTTPStatus.BAD_GATEWAY, "kimi_invalid_response", "Kimi 返回格式异常，未保存草稿", grounding_missing=True)
-        if not isinstance(result, dict):
-            raise ApiError(HTTPStatus.BAD_GATEWAY, "kimi_invalid_response", "Kimi 返回格式异常，未保存草稿", grounding_missing=True)
-        return result
 
     @staticmethod
     def _normalize_draft_result(

@@ -31,8 +31,8 @@ class SchemaV3Tests(unittest.TestCase):
                     "contact_suppressions",
                 }.issubset(names)
             )
-            self.assertEqual(SCHEMA_VERSION, 3)
-            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 3)
+            self.assertEqual(SCHEMA_VERSION, 4)
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 4)
             order_columns = {
                 row[1] for row in connection.execute("PRAGMA table_info(orders)")
             }

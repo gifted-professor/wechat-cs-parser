@@ -101,6 +101,78 @@ class DashboardActionQueueTests(unittest.TestCase):
         self.assertNotIn("phone_hmac", self.javascript)
         self.assertNotIn("raw_wechat", self.javascript)
 
+    def test_sales_profile_pilot_has_review_only_two_column_workbench(self) -> None:
+        self.assertIn('data-view="profiles"', self.html)
+        self.assertIn('id="view-profiles"', self.html)
+        self.assertIn("50 人画像验收", self.html)
+        self.assertIn('id="salesProfileFilters"', self.html)
+        self.assertIn('id="salesProfileStratum"', self.html)
+        self.assertIn('id="salesProfileStatus"', self.html)
+        self.assertIn('id="salesProfileList"', self.html)
+        self.assertIn('id="salesProfileDetail"', self.html)
+        self.assertIn('id="salesProfileReviewForm"', self.html)
+
+        combined = self.html + self.javascript
+        for label in (
+            "客户价值",
+            "商品偏好",
+            "时间节律",
+            "购买驱动力",
+            "历史承诺",
+            "当前机会",
+            "建议联系理由",
+            "自然开场",
+            "风险",
+            "未知项",
+            "事实准确度",
+            "洞察实用性",
+            "销售真实感",
+            "时机质量",
+            "证据质量",
+        ):
+            self.assertIn(label, combined)
+        self.assertIn("历史快照截止时间", self.html)
+        self.assertIn("联系前核对最新状态", self.html)
+        self.assertIn("<details", self.html)
+        self.assertIn('value="approved"', self.html)
+        self.assertIn('value="edited"', self.html)
+        self.assertIn('value="rejected"', self.html)
+
+        self.assertIn(
+            "/sales-profile-pilot?run_id=latest&status=",
+            self.javascript,
+        )
+        self.assertIn(
+            "/sales-profile-pilot/${encodeURIComponent(salesProfileId)}",
+            self.javascript,
+        )
+        self.assertIn(
+            "/sales-profile-pilot/${encodeURIComponent(profile.sales_profile_id)}/review",
+            self.javascript,
+        )
+        for contract_field in (
+            "profile_json",
+            "deterministic_facts_json",
+            "accepted_events",
+            "evidence_json",
+            "card_version",
+        ):
+            self.assertIn(contract_field, self.javascript)
+        for allowed_status in (
+            "pending",
+            "running",
+            "succeeded",
+            "failed",
+            "reviewed",
+            "unreviewed",
+        ):
+            self.assertIn(f'value="{allowed_status}"', self.html)
+
+        buttons = re.findall(r"<button\b[^>]*>.*?</button>", self.html, re.DOTALL)
+        self.assertFalse(any("发送" in button for button in buttons))
+        self.assertNotIn("/sales-profile-pilot/run", self.javascript)
+        self.assertNotIn("/sales-profile-pilot/send", self.javascript)
+
     @unittest.skipUnless(shutil.which("node"), "Node.js is required for proxy safety test")
     def test_proxy_hydrates_allowlist_and_strips_private_keys_recursively(self) -> None:
         proxy_path = PROJECT_ROOT / "dashboard_integration" / "wechat_cs_proxy.js"
@@ -163,7 +235,18 @@ process.stdout.write(JSON.stringify({
     draft: proxy.isAllowedActionRoute('POST', '/action-queue/action_abc123/draft'),
     feedback: proxy.isAllowedActionRoute('POST', '/action-queue/action_abc123/feedback'),
     customers: proxy.isAllowedActionRoute('GET', '/customer-insights'),
-    legacyDraft: proxy.isAllowedActionRoute('POST', '/drafts')
+    legacyDraft: proxy.isAllowedActionRoute('POST', '/drafts'),
+    profileList: proxy.isAllowedActionRoute('GET', '/sales-profile-pilot'),
+    profileDetail: proxy.isAllowedActionRoute('GET', '/sales-profile-pilot/sales_profile_abc123'),
+    profileReview: proxy.isAllowedActionRoute('POST', '/sales-profile-pilot/sales_profile_abc123/review'),
+    profileRunGet: proxy.isAllowedActionRoute('GET', '/sales-profile-pilot/run'),
+    profileRunPost: proxy.isAllowedActionRoute('POST', '/sales-profile-pilot/run'),
+    profileRunReview: proxy.isAllowedActionRoute('POST', '/sales-profile-pilot/run/review'),
+    profileSendGet: proxy.isAllowedActionRoute('GET', '/sales-profile-pilot/send'),
+    profileSend: proxy.isAllowedActionRoute('POST', '/sales-profile-pilot/sales_profile_abc123/send'),
+    profileTrailingSlash: proxy.isAllowedActionRoute('GET', '/sales-profile-pilot/'),
+    profileReviewExtra: proxy.isAllowedActionRoute('POST', '/sales-profile-pilot/sales_profile_abc123/review/extra'),
+    profileWrongMethod: proxy.isAllowedActionRoute('POST', '/sales-profile-pilot/sales_profile_abc123')
   }
 }));
 """ % json.dumps(str(proxy_path))
@@ -225,6 +308,17 @@ process.stdout.write(JSON.stringify({
                 "feedback": True,
                 "customers": False,
                 "legacyDraft": False,
+                "profileList": True,
+                "profileDetail": True,
+                "profileReview": True,
+                "profileRunGet": False,
+                "profileRunPost": False,
+                "profileRunReview": False,
+                "profileSendGet": False,
+                "profileSend": False,
+                "profileTrailingSlash": False,
+                "profileReviewExtra": False,
+                "profileWrongMethod": False,
             },
         )
 

@@ -17,7 +17,7 @@ from .core import DEFAULT_HMAC_SECRET, hmac_id, json_dumps, parse_timestamp
 from .source_snapshot import assert_project_output, hmac_key_fingerprint
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 M0_ACCEPTANCE_GATES = ("m0_a", "m0_b", "m0_c", "m0_d", "integration")
 
@@ -290,6 +290,8 @@ def initialize_schema(connection: sqlite3.Connection) -> None:
             source_namespace TEXT NOT NULL,
             record_id TEXT NOT NULL,
             phone_hmac TEXT,
+            ordered_at TEXT,
+            paid_at TEXT,
             paid_on TEXT,
             revenue_minor INTEGER,
             currency TEXT NOT NULL DEFAULT 'CNY',
@@ -299,6 +301,7 @@ def initialize_schema(connection: sqlite3.Connection) -> None:
             category TEXT,
             color TEXT,
             size TEXT,
+            order_note TEXT,
             refund_type TEXT,
             refund_reason TEXT,
             refund_amount_minor INTEGER,
@@ -361,6 +364,9 @@ def initialize_schema(connection: sqlite3.Connection) -> None:
     _ensure_column(connection, "orders", "category", "TEXT")
     _ensure_column(connection, "orders", "color", "TEXT")
     _ensure_column(connection, "orders", "size", "TEXT")
+    _ensure_column(connection, "orders", "ordered_at", "TEXT")
+    _ensure_column(connection, "orders", "paid_at", "TEXT")
+    _ensure_column(connection, "orders", "order_note", "TEXT")
     _ensure_column(connection, "decision_cards", "boundary_message_key", "TEXT")
     connection.executescript(
         """
@@ -532,6 +538,184 @@ def initialize_schema(connection: sqlite3.Connection) -> None:
         "missing_facts_json",
         "TEXT NOT NULL DEFAULT '[]'",
     )
+    connection.executescript(
+        """
+        CREATE INDEX IF NOT EXISTS orders_phone_paid_at
+            ON orders(phone_hmac, paid_at) WHERE phone_hmac IS NOT NULL;
+
+        CREATE TABLE IF NOT EXISTS customer_aux_facts (
+            aux_fact_id TEXT PRIMARY KEY,
+            source_snapshot_id TEXT NOT NULL
+                REFERENCES source_snapshots(snapshot_id) ON DELETE CASCADE,
+            source_namespace TEXT NOT NULL,
+            source_record_id TEXT NOT NULL,
+            customer_key TEXT NOT NULL
+                REFERENCES customers(customer_key) ON DELETE CASCADE,
+            profile_id TEXT NOT NULL,
+            phone_hmac TEXT NOT NULL,
+            member_birthday TEXT,
+            preferred_style TEXT,
+            expected_gift TEXT,
+            member_shop TEXT,
+            source_hash TEXT NOT NULL,
+            quality_flags_json TEXT NOT NULL DEFAULT '[]',
+            created_at TEXT NOT NULL,
+            UNIQUE(
+                source_snapshot_id, source_namespace, source_record_id, customer_key
+            )
+        );
+        CREATE INDEX IF NOT EXISTS customer_aux_facts_customer_snapshot
+            ON customer_aux_facts(customer_key, source_snapshot_id);
+        CREATE INDEX IF NOT EXISTS customer_aux_facts_phone_snapshot
+            ON customer_aux_facts(phone_hmac, source_snapshot_id);
+
+        CREATE TABLE IF NOT EXISTS sales_profile_runs (
+            sales_profile_run_id TEXT PRIMARY KEY,
+            source_run_id TEXT NOT NULL
+                REFERENCES pipeline_runs(run_id) ON DELETE CASCADE,
+            as_of_at TEXT NOT NULL,
+            status TEXT NOT NULL CHECK(status IN (
+                'prepared','running','partial','complete','failed'
+            )),
+            model TEXT NOT NULL,
+            prompt_version TEXT NOT NULL,
+            profile_schema_version TEXT NOT NULL,
+            sampling_version TEXT NOT NULL,
+            message_snapshot_id TEXT NOT NULL
+                REFERENCES source_snapshots(snapshot_id),
+            order_snapshot_id TEXT
+                REFERENCES order_snapshots(order_snapshot_id) ON DELETE SET NULL,
+            aux_snapshot_id TEXT
+                REFERENCES source_snapshots(snapshot_id) ON DELETE SET NULL,
+            cohort_hash TEXT NOT NULL,
+            config_json TEXT NOT NULL DEFAULT '{}',
+            counts_json TEXT NOT NULL DEFAULT '{}',
+            quality_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            started_at TEXT,
+            completed_at TEXT,
+            UNIQUE(source_run_id, as_of_at, sampling_version, cohort_hash)
+        );
+        CREATE INDEX IF NOT EXISTS sales_profile_runs_status_time
+            ON sales_profile_runs(status, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS sales_profile_subjects (
+            subject_id TEXT PRIMARY KEY,
+            sales_profile_run_id TEXT NOT NULL
+                REFERENCES sales_profile_runs(sales_profile_run_id) ON DELETE CASCADE,
+            customer_key TEXT NOT NULL
+                REFERENCES customers(customer_key) ON DELETE CASCADE,
+            profile_id TEXT NOT NULL,
+            phone_hmac TEXT NOT NULL,
+            stratum TEXT NOT NULL CHECK(stratum IN (
+                'complex_risk','future_return_wait','high_frequency',
+                'high_value','dormant_repeat','control'
+            )),
+            stratum_rank INTEGER NOT NULL CHECK(stratum_rank > 0),
+            feature_snapshot_id TEXT
+                REFERENCES customer_value_snapshots(feature_snapshot_id),
+            feature_payload_json TEXT NOT NULL DEFAULT '{}',
+            feature_freshness_json TEXT NOT NULL DEFAULT '{}',
+            selection_reason_json TEXT NOT NULL DEFAULT '{}',
+            status TEXT NOT NULL DEFAULT 'prepared' CHECK(status IN (
+                'prepared','running','succeeded','failed'
+            )),
+            input_hash TEXT,
+            idempotency_key TEXT,
+            error_code TEXT,
+            error_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(sales_profile_run_id, customer_key),
+            UNIQUE(sales_profile_run_id, stratum, stratum_rank)
+        );
+        CREATE INDEX IF NOT EXISTS sales_profile_subjects_run_status
+            ON sales_profile_subjects(sales_profile_run_id, status, stratum, stratum_rank);
+
+        CREATE TABLE IF NOT EXISTS sales_profile_events (
+            sales_profile_event_id TEXT PRIMARY KEY,
+            subject_id TEXT NOT NULL
+                REFERENCES sales_profile_subjects(subject_id) ON DELETE CASCADE,
+            chunk_index INTEGER NOT NULL DEFAULT 0 CHECK(chunk_index >= 0),
+            event_type TEXT NOT NULL,
+            event_json TEXT NOT NULL,
+            evidence_json TEXT NOT NULL,
+            confidence REAL CHECK(confidence IS NULL OR (
+                confidence >= 0 AND confidence <= 1
+            )),
+            validation_state TEXT NOT NULL CHECK(validation_state IN (
+                'accepted','rejected'
+            )),
+            rejection_reason TEXT,
+            model TEXT NOT NULL,
+            prompt_version TEXT NOT NULL,
+            input_hash TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS sales_profile_events_subject_state
+            ON sales_profile_events(subject_id, validation_state, chunk_index);
+
+        CREATE TABLE IF NOT EXISTS sales_profiles (
+            sales_profile_id TEXT PRIMARY KEY,
+            subject_id TEXT NOT NULL UNIQUE
+                REFERENCES sales_profile_subjects(subject_id) ON DELETE CASCADE,
+            status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN (
+                'pending','running','succeeded','failed'
+            )),
+            input_hash TEXT,
+            idempotency_key TEXT UNIQUE,
+            model TEXT NOT NULL,
+            prompt_version TEXT NOT NULL,
+            profile_schema_version TEXT NOT NULL,
+            card_version TEXT,
+            deterministic_facts_json TEXT NOT NULL DEFAULT '{}',
+            profile_json TEXT NOT NULL DEFAULT '{}',
+            evidence_json TEXT NOT NULL DEFAULT '[]',
+            error_code TEXT,
+            error_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS sales_profiles_status_updated
+            ON sales_profiles(status, updated_at DESC);
+
+        CREATE TABLE IF NOT EXISTS sales_profile_reviews (
+            review_id TEXT PRIMARY KEY,
+            sales_profile_id TEXT NOT NULL
+                REFERENCES sales_profiles(sales_profile_id) ON DELETE CASCADE,
+            card_version TEXT NOT NULL,
+            verdict TEXT NOT NULL CHECK(verdict IN (
+                'approved','edited','rejected'
+            )),
+            fact_accuracy INTEGER NOT NULL CHECK(fact_accuracy BETWEEN 1 AND 5),
+            insight_usefulness INTEGER NOT NULL
+                CHECK(insight_usefulness BETWEEN 1 AND 5),
+            sales_realism INTEGER NOT NULL CHECK(sales_realism BETWEEN 1 AND 5),
+            timing_quality INTEGER NOT NULL CHECK(timing_quality BETWEEN 1 AND 5),
+            evidence_quality INTEGER NOT NULL CHECK(evidence_quality BETWEEN 1 AND 5),
+            corrections_json TEXT NOT NULL DEFAULT '{}',
+            notes TEXT NOT NULL DEFAULT '',
+            reviewer TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(sales_profile_id, reviewer)
+        );
+        CREATE INDEX IF NOT EXISTS sales_profile_reviews_profile_time
+            ON sales_profile_reviews(sales_profile_id, updated_at DESC);
+        """
+    )
+    _ensure_column(
+        connection,
+        "sales_profile_subjects",
+        "feature_payload_json",
+        "TEXT NOT NULL DEFAULT '{}'",
+    )
+    _ensure_column(
+        connection,
+        "sales_profile_subjects",
+        "feature_freshness_json",
+        "TEXT NOT NULL DEFAULT '{}'",
+    )
     applied_at = datetime.now().astimezone().isoformat(timespec="seconds")
     connection.execute(
         "INSERT OR IGNORE INTO schema_migrations(version,applied_at,checksum) VALUES(?,?,?)",
@@ -540,6 +724,10 @@ def initialize_schema(connection: sqlite3.Connection) -> None:
     connection.execute(
         "INSERT OR IGNORE INTO schema_migrations(version,applied_at,checksum) VALUES(?,?,?)",
         (3, applied_at, "wechat-cs-action-queue-schema-v3"),
+    )
+    connection.execute(
+        "INSERT OR IGNORE INTO schema_migrations(version,applied_at,checksum) VALUES(?,?,?)",
+        (4, applied_at, "wechat-cs-sales-profile-schema-v4"),
     )
     set_meta(connection, "schema_version", str(SCHEMA_VERSION))
     connection.execute("PRAGMA user_version = %d" % SCHEMA_VERSION)

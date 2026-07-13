@@ -283,7 +283,16 @@ def _action_schema_complete(connection) -> bool:
     }
     return (
         {"signals_json", "missing_facts_json"}.issubset(item_columns)
-        and {"sku_name", "factory", "category", "color", "size"}.issubset(order_columns)
+        and {
+            "sku_name",
+            "factory",
+            "category",
+            "color",
+            "size",
+            "ordered_at",
+            "paid_at",
+            "order_note",
+        }.issubset(order_columns)
         and "boundary_message_key" in card_columns
     )
 
@@ -456,6 +465,8 @@ def _canonical_order(row) -> CanonicalOrder:
         source_namespace=str(row["source_namespace"]),
         record_id=str(row["record_id"]),
         phone_hmac=str(row["phone_hmac"]) if row["phone_hmac"] else None,
+        ordered_at=str(row["ordered_at"]) if row["ordered_at"] else None,
+        paid_at=str(row["paid_at"]) if row["paid_at"] else None,
         paid_on=str(row["paid_on"]) if row["paid_on"] else None,
         revenue_minor=int(row["revenue_minor"]) if row["revenue_minor"] is not None else None,
         currency=str(row["currency"]),
@@ -476,6 +487,7 @@ def _canonical_order(row) -> CanonicalOrder:
         category=str(row["category"]) if row["category"] else None,
         color=str(row["color"]) if row["color"] else None,
         size=str(row["size"]) if row["size"] else None,
+        order_note=str(row["order_note"]) if row["order_note"] else None,
     )
 
 
@@ -510,7 +522,14 @@ def _truncate_orders(orders: Sequence[CanonicalOrder], as_of_at: datetime) -> Li
     output: List[CanonicalOrder] = []
     as_of_day = as_of_at.astimezone(SHANGHAI).date()
     for item in orders:
-        if item.paid_on:
+        if item.paid_at:
+            try:
+                paid_at = _moment(item.paid_at, field="paid_at")
+            except ValueError:
+                paid_at = None
+            if paid_at is not None and paid_at > as_of_at:
+                continue
+        elif item.paid_on:
             try:
                 paid_on = date.fromisoformat(item.paid_on[:10])
             except ValueError:
@@ -1581,7 +1600,7 @@ def build_action_artifacts(
         # M0 run databases are already versioned.  Upgrade an older database
         # once, but avoid touching build metadata on every idempotent rebuild.
         schema_version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-        if schema_version < 3 or not _action_schema_complete(connection):
+        if schema_version < 4 or not _action_schema_complete(connection):
             initialize_schema(connection)
         quality_before = {
             str(row["run_id"]): str(row["quality_json"])

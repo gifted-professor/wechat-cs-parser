@@ -12,7 +12,7 @@ from __future__ import annotations
 import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from statistics import median
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 from zoneinfo import ZoneInfo
@@ -21,7 +21,7 @@ from .core import redact_text
 
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
-FEATURE_RULE_VERSION = "customer-features-v1"
+FEATURE_RULE_VERSION = "customer-features-v2"
 MESSAGE_FRESHNESS_SECONDS = 15 * 60
 ORDER_FRESHNESS_SECONDS = 24 * 60 * 60
 HEALTHY_COLLECTOR_STATES = frozenset({"running", "healthy", "ok"})
@@ -34,6 +34,10 @@ VALUE_HIGH_UPPER_MINOR = 500_000
 MIN_CONTACT_MESSAGES = 5
 MIN_CONTACT_ACTIVE_DAYS = 3
 MIN_CONTACT_WINDOW_SHARE = 0.40
+MIN_RHYTHM_OBSERVATIONS = 5
+MIN_RHYTHM_SHARE = 0.40
+TURN_MERGE_SECONDS = 15 * 60
+MAX_REPLY_DELAY = timedelta(days=7)
 MANUAL_CONTACT_WINDOW = "工作时段人工选择"
 _CONTACT_WINDOWS = (
     ("morning", 9, 12, "09:00-12:00"),
@@ -44,6 +48,20 @@ _CONTACT_WINDOWS = (
 _CONTACT_TIE_ORDER = {"afternoon": 0, "morning": 1, "evening": 2}
 _OPAQUE_CUSTOMER = re.compile(r"^customer_[0-9a-f]{16,64}$")
 _OPAQUE_PHONE = re.compile(r"^phone_[0-9a-f]{16,64}$")
+_RHYTHM_PERIODS = (
+    ("overnight", 0, 6),
+    ("morning", 6, 12),
+    ("noon", 12, 14),
+    ("afternoon", 14, 18),
+    ("evening", 18, 24),
+)
+_RHYTHM_TIE_ORDER = {
+    "afternoon": 0,
+    "morning": 1,
+    "noon": 2,
+    "evening": 3,
+    "overnight": 4,
+}
 
 
 @dataclass(frozen=True)
@@ -80,6 +98,19 @@ class FeatureBuildQuality:
 
 
 @dataclass(frozen=True)
+class RhythmSummary:
+    """Deterministic hour and month rhythm with an evidence threshold."""
+
+    observation_count: int
+    hour_counts: Tuple[int, ...]
+    month_bucket_counts: Tuple[int, int, int]
+    period_counts: Tuple[int, int, int, int, int]
+    preferred_period: Optional[str]
+    preference_state: str
+    confidence: Optional[float]
+
+
+@dataclass(frozen=True)
 class CustomerProfile:
     customer_key: str
     as_of_at: str
@@ -94,6 +125,10 @@ class CustomerProfile:
     contact_window_basis: str
     contact_window_evidence_count: int
     contact_window_confidence: Optional[float]
+    customer_message_rhythm: RhythmSummary
+    customer_reply_rhythm: RhythmSummary
+    reply_delay_observation_count: int
+    median_reply_delay_seconds: Optional[float]
 
     order_features_available: bool
     rfm_recency_days: Optional[int]
@@ -109,6 +144,8 @@ class CustomerProfile:
     preferred_categories: Tuple[str, ...]
     preferred_colors: Tuple[str, ...]
     preferred_sizes: Tuple[str, ...]
+    order_rhythm: RhythmSummary
+    payment_rhythm: RhythmSummary
 
     unknown_aftersales_count: int
     quality_flags: Tuple[str, ...]
@@ -288,6 +325,97 @@ def _contact_window(
     return best_label, "wechat_customer_messages", best_count, round(confidence, 6)
 
 
+def _rhythm_summary(timestamps: Sequence[datetime]) -> RhythmSummary:
+    hour_counts = [0] * 24
+    month_counts = [0, 0, 0]
+    for at in timestamps:
+        hour_counts[at.hour] += 1
+        bucket = day_of_month_bucket(at)
+        month_counts[{"early": 0, "mid": 1, "late": 2}[bucket]] += 1
+    period_counts = tuple(
+        sum(hour_counts[start:end]) for _code, start, end in _RHYTHM_PERIODS
+    )
+    observation_count = len(timestamps)
+    if observation_count < MIN_RHYTHM_OBSERVATIONS:
+        return RhythmSummary(
+            observation_count=observation_count,
+            hour_counts=tuple(hour_counts),
+            month_bucket_counts=tuple(month_counts),
+            period_counts=period_counts,
+            preferred_period=None,
+            preference_state="insufficient_evidence",
+            confidence=None,
+        )
+    ranked = sorted(
+        zip(period_counts, (item[0] for item in _RHYTHM_PERIODS)),
+        key=lambda item: (-item[0], _RHYTHM_TIE_ORDER[item[1]]),
+    )
+    best_count, best_period = ranked[0]
+    confidence = best_count / observation_count if observation_count else 0.0
+    if confidence < MIN_RHYTHM_SHARE:
+        return RhythmSummary(
+            observation_count=observation_count,
+            hour_counts=tuple(hour_counts),
+            month_bucket_counts=tuple(month_counts),
+            period_counts=period_counts,
+            preferred_period=None,
+            preference_state="insufficient_evidence",
+            confidence=None,
+        )
+    return RhythmSummary(
+        observation_count=observation_count,
+        hour_counts=tuple(hour_counts),
+        month_bucket_counts=tuple(month_counts),
+        period_counts=period_counts,
+        preferred_period=best_period,
+        preference_state="supported",
+        confidence=round(confidence, 6),
+    )
+
+
+def _conversation_turns(
+    rows: Sequence[Tuple[str, str, datetime, int, str]],
+) -> Tuple[Tuple[str, datetime, datetime], ...]:
+    """Merge consecutive same-role messages within a 15-minute turn."""
+
+    turns = []
+    for _customer_key, role, at, ordinal, message_key in sorted(
+        rows, key=lambda row: (row[2], row[3], row[4])
+    ):
+        if (
+            turns
+            and turns[-1][0] == role
+            and 0 <= (at - turns[-1][2]).total_seconds() <= TURN_MERGE_SECONDS
+        ):
+            previous_role, started_at, _ended_at = turns[-1]
+            turns[-1] = (previous_role, started_at, at)
+        else:
+            turns.append((role, at, at))
+    return tuple(turns)
+
+
+def _reply_observations(
+    turns: Sequence[Tuple[str, datetime, datetime]],
+) -> Tuple[Tuple[datetime, float], ...]:
+    """Match one customer reply to the latest preceding studio turn."""
+
+    observations = []
+    pending_studio_end: Optional[datetime] = None
+    for role, started_at, ended_at in turns:
+        if role == "studio":
+            pending_studio_end = ended_at
+            continue
+        if pending_studio_end is None:
+            continue
+        delay = started_at - pending_studio_end
+        if timedelta(0) <= delay <= MAX_REPLY_DELAY:
+            observations.append((started_at, delay.total_seconds()))
+        # Whether timely or late, this customer turn consumes the pending
+        # studio turn so a later customer message cannot count twice.
+        pending_studio_end = None
+    return tuple(observations)
+
+
 def _value_bucket(monetary_minor: int) -> str:
     if monetary_minor <= 0:
         return "none"
@@ -329,15 +457,43 @@ def _top_preferences(
 def _profile_order_features(
     order_rows: Sequence[object],
     *,
-    as_of_date: date,
+    as_of_at: datetime,
     available: bool,
 ) -> Dict[str, Any]:
     unknown_aftersales = 0
     invalid_orders = 0
     historical = []
+    order_timestamps = []
+    payment_timestamps = []
+    unknown_order_time_count = 0
+    unknown_payment_time_count = 0
+
+    empty_rhythm = _rhythm_summary(())
+
+    if available:
+        for item in order_rows:
+            ordered_value = _value(item, "ordered_at")
+            if ordered_value is None or str(ordered_value).strip() == "":
+                continue
+            try:
+                ordered_at = _local_datetime(ordered_value, field="ordered_at")
+            except ValueError:
+                invalid_orders += 1
+                continue
+            if ordered_at <= as_of_at:
+                if any(
+                    (ordered_at.hour, ordered_at.minute, ordered_at.second, ordered_at.microsecond)
+                ):
+                    order_timestamps.append(ordered_at)
+                else:
+                    # Dashboard date columns are serialized as midnight even
+                    # when no clock time was captured.  Retain the timestamp as
+                    # an order fact, but never infer a midnight preference.
+                    unknown_order_time_count += 1
 
     for item in order_rows:
         paid_value = _value(item, "paid_on")
+        paid_at_value = _value(item, "paid_at")
         revenue_value = _value(item, "revenue_minor")
         if paid_value is None or str(paid_value).strip() == "":
             continue
@@ -350,11 +506,33 @@ def _profile_order_features(
         if revenue_minor <= 0:
             invalid_orders += 1
             continue
-        if paid_on == as_of_date:
-            continue
-        if paid_on > as_of_date:
-            continue
+        paid_at = None
+        if paid_at_value is not None and str(paid_at_value).strip() != "":
+            try:
+                paid_at = _local_datetime(paid_at_value, field="paid_at")
+            except ValueError:
+                invalid_orders += 1
+                continue
+            paid_on = paid_at.date()
+            if any((paid_at.hour, paid_at.minute, paid_at.second, paid_at.microsecond)):
+                if paid_at > as_of_at:
+                    continue
+            else:
+                # Treat a zeroed clock as date-only evidence.  This avoids
+                # leaking an unknown cutoff-day payment and avoids teaching a
+                # false 00:00 buying habit.
+                unknown_payment_time_count += 1
+                if paid_on >= as_of_at.date():
+                    continue
+                paid_at = None
+        else:
+            # Legacy rows only have a calendar date. Exclude the cutoff day
+            # conservatively because their exact payment time is unknowable.
+            if paid_on >= as_of_at.date():
+                continue
         historical.append((paid_on, revenue_minor, item))
+        if paid_at is not None:
+            payment_timestamps.append(paid_at)
 
     if not available:
         return {
@@ -371,7 +549,11 @@ def _profile_order_features(
             "preferred_categories": (),
             "preferred_colors": (),
             "preferred_sizes": (),
+            "order_rhythm": empty_rhythm,
+            "payment_rhythm": empty_rhythm,
             "unknown_aftersales_count": 0,
+            "unknown_order_time_count": unknown_order_time_count,
+            "unknown_payment_time_count": unknown_payment_time_count,
             "invalid_order_count": invalid_orders,
         }
 
@@ -398,12 +580,9 @@ def _profile_order_features(
         except ValueError:
             unknown_aftersales += 1
             continue
-        if refund_on == as_of_date:
+        if refund_on >= as_of_at.date():
             continue
-        elif refund_on > as_of_date:
-            continue
-        else:
-            aftersales_count += 1
+        aftersales_count += 1
 
     frequency = len(historical)
     if frequency == 0:
@@ -422,7 +601,7 @@ def _profile_order_features(
             aftersales_risk = "high"
 
     return {
-        "rfm_recency_days": (as_of_date - max(payment_dates)).days if payment_dates else None,
+        "rfm_recency_days": (as_of_at.date() - max(payment_dates)).days if payment_dates else None,
         "rfm_frequency": frequency,
         "rfm_monetary_minor": monetary_minor,
         "value_bucket": _value_bucket(monetary_minor),
@@ -435,7 +614,11 @@ def _profile_order_features(
         "preferred_categories": _top_preferences(historical, "category"),
         "preferred_colors": _top_preferences(historical, "color"),
         "preferred_sizes": _top_preferences(historical, "size"),
+        "order_rhythm": _rhythm_summary(order_timestamps),
+        "payment_rhythm": _rhythm_summary(payment_timestamps),
         "unknown_aftersales_count": unknown_aftersales,
+        "unknown_order_time_count": unknown_order_time_count,
+        "unknown_payment_time_count": unknown_payment_time_count,
         "invalid_order_count": invalid_orders,
     }
 
@@ -452,10 +635,11 @@ def build_customer_profiles(
 ) -> CustomerFeatureSnapshot:
     """Build one point-in-time profile per unique approved phone HMAC.
 
-    Messages at or before ``as_of_at`` are eligible.  Orders only carry a date,
-    so customer payments and aftersales events on the as-of calendar date are
-    conservatively excluded.  A stale order snapshot hides all value-derived
-    fields, while a stale or unhealthy message source fails the queue closed.
+    Messages at or before ``as_of_at`` are eligible. Exact order timestamps are
+    filtered against that boundary; legacy date-only payments on the cutoff day
+    remain conservatively excluded. A stale order snapshot hides all
+    value-derived fields, while a stale or unhealthy message source fails the
+    queue closed.
     """
 
     as_of = _local_datetime(as_of_at, field="as_of_at")
@@ -550,17 +734,44 @@ def build_customer_profiles(
         for _customer_key, _role, at, _ordinal, _message_key in customer_messages:
             hour_counts[at.hour] += 1
             active_dates.add(at.date())
-        contact_window, contact_basis, evidence_count, contact_confidence = _contact_window(
-            hour_counts,
-            message_count=len(customer_messages),
-            active_day_count=len(active_dates),
+        customer_turn_timestamps = []
+        reply_observations = []
+        for customer_key in customer_keys:
+            conversation_rows = [row for row in relevant_messages if row[0] == customer_key]
+            turns = _conversation_turns(conversation_rows)
+            customer_turn_timestamps.extend(
+                started_at for role, started_at, _ended_at in turns if role == "customer"
+            )
+            reply_observations.extend(_reply_observations(turns))
+        customer_message_rhythm = _rhythm_summary(customer_turn_timestamps)
+        reply_timestamps = [item[0] for item in reply_observations]
+        reply_delays = [item[1] for item in reply_observations]
+        customer_reply_rhythm = _rhythm_summary(reply_timestamps)
+
+        reply_contact = _contact_window(
+            customer_reply_rhythm.hour_counts,
+            message_count=customer_reply_rhythm.observation_count,
+            active_day_count=len({item.date() for item in reply_timestamps}),
         )
+        if reply_contact[1] != "insufficient_evidence":
+            contact_window = reply_contact[0]
+            contact_basis = "wechat_customer_replies"
+            evidence_count = reply_contact[2]
+            contact_confidence = reply_contact[3]
+        else:
+            contact_window, contact_basis, evidence_count, contact_confidence = _contact_window(
+                hour_counts,
+                message_count=len(customer_messages),
+                active_day_count=len(active_dates),
+            )
         order_features = _profile_order_features(
             orders_by_phone.get(phone_hmac, ()),
-            as_of_date=as_of.date(),
+            as_of_at=as_of,
             available=freshness.orders_fresh,
         )
         profile_invalid_orders += int(order_features.pop("invalid_order_count"))
+        unknown_order_time_count = int(order_features.pop("unknown_order_time_count"))
+        unknown_payment_time_count = int(order_features.pop("unknown_payment_time_count"))
         flags = set()
         if len(customer_keys) > 1:
             flags.add("linked_customer_deduplicated")
@@ -572,6 +783,10 @@ def build_customer_profiles(
             flags.add("no_order_history")
         if order_features["unknown_aftersales_count"]:
             flags.add("incomplete_aftersales_history")
+        if unknown_order_time_count:
+            flags.add("order_clock_time_unknown")
+        if unknown_payment_time_count:
+            flags.add("payment_clock_time_unknown")
 
         profiles.append(
             CustomerProfile(
@@ -587,6 +802,12 @@ def build_customer_profiles(
                 contact_window_basis=contact_basis,
                 contact_window_evidence_count=evidence_count,
                 contact_window_confidence=contact_confidence,
+                customer_message_rhythm=customer_message_rhythm,
+                customer_reply_rhythm=customer_reply_rhythm,
+                reply_delay_observation_count=len(reply_delays),
+                median_reply_delay_seconds=(
+                    float(median(reply_delays)) if reply_delays else None
+                ),
                 order_features_available=freshness.orders_fresh,
                 quality_flags=tuple(sorted(flags)),
                 **order_features,

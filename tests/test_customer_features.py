@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import unittest
 from dataclasses import asdict
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 from wechat_cs.core import Message
@@ -48,12 +48,17 @@ def order(
     category: Optional[str] = None,
     color: Optional[str] = None,
     size: Optional[str] = None,
+    ordered_at: Optional[str] = None,
+    paid_at: Optional[str] = None,
+    order_note: Optional[str] = None,
 ) -> CanonicalOrder:
     return CanonicalOrder(
         order_line_id=order_id,
         source_namespace="synthetic",
         record_id="record-" + order_id,
         phone_hmac=phone_hmac,
+        ordered_at=ordered_at,
+        paid_at=paid_at,
         paid_on=paid_on,
         revenue_minor=revenue_minor,
         currency="CNY",
@@ -70,6 +75,7 @@ def order(
         category=category,
         color=color,
         size=size,
+        order_note=order_note,
     )
 
 
@@ -226,6 +232,155 @@ class CustomerFeatureTests(unittest.TestCase):
         self.assertGreaterEqual(profile.contact_window_confidence or 0, 0.99)
         self.assertTrue(snapshot.freshness.queue_ready)
         self.assertEqual(snapshot.quality.invalid_message_count, 0)
+
+    def test_reply_rhythm_merges_turns_deduplicates_replies_and_prefers_reply_time(self) -> None:
+        customer_key = opaque_customer(1)
+        rows = []
+        ordinal = 0
+        # Five distinct service -> customer replies. Same-role messages within
+        # 15 minutes are one turn and therefore one reply observation.
+        pairs = (
+            ("2026-07-01T08:00:00+08:00", "2026-07-01T09:00:00+08:00"),
+            ("2026-07-02T08:00:00+08:00", "2026-07-02T09:30:00+08:00"),
+            ("2026-07-03T18:00:00+08:00", "2026-07-03T19:00:00+08:00"),
+            ("2026-07-04T18:00:00+08:00", "2026-07-04T20:00:00+08:00"),
+            ("2026-07-05T18:00:00+08:00", "2026-07-05T20:30:00+08:00"),
+        )
+        for index, (studio_at, customer_at) in enumerate(pairs, start=1):
+            ordinal += 1
+            rows.append(message(f"s{index}a", customer_key, "studio", studio_at, ordinal))
+            ordinal += 1
+            studio_followup = (datetime.fromisoformat(studio_at) + timedelta(minutes=5)).isoformat()
+            rows.append(message(f"s{index}b", customer_key, "studio", studio_followup, ordinal))
+            ordinal += 1
+            rows.append(message(f"c{index}a", customer_key, "customer", customer_at, ordinal))
+            ordinal += 1
+            customer_followup = (datetime.fromisoformat(customer_at) + timedelta(minutes=10)).isoformat()
+            rows.append(message(f"c{index}b", customer_key, "customer", customer_followup, ordinal))
+        # A customer message without a new studio turn is not another reply.
+        rows.append(message("free-customer", customer_key, "customer", "2026-07-06T15:00:00+08:00", ordinal + 1))
+
+        snapshot = self.build(
+            [ApprovedIdentityLink(customer_key, opaque_phone(1))],
+            messages=rows,
+        )
+        profile = snapshot.profiles[0]
+        self.assertEqual(profile.feature_rule_version, "customer-features-v2")
+        self.assertEqual(profile.customer_reply_rhythm.observation_count, 5)
+        self.assertEqual(profile.customer_reply_rhythm.hour_counts[9], 2)
+        self.assertEqual(profile.customer_reply_rhythm.hour_counts[19], 1)
+        self.assertEqual(profile.customer_reply_rhythm.hour_counts[20], 2)
+        self.assertEqual(profile.customer_reply_rhythm.preferred_period, "evening")
+        self.assertEqual(profile.customer_reply_rhythm.preference_state, "supported")
+        self.assertAlmostEqual(profile.customer_reply_rhythm.confidence or 0, 0.6)
+        self.assertEqual(profile.reply_delay_observation_count, 5)
+        self.assertEqual(profile.median_reply_delay_seconds, 5_100.0)
+        self.assertEqual(profile.recommended_contact_window, "18:00-22:00")
+        self.assertEqual(profile.contact_window_basis, "wechat_customer_replies")
+
+    def test_reply_after_seven_days_and_future_messages_do_not_enter_rhythm(self) -> None:
+        customer_key = opaque_customer(1)
+        snapshot = self.build(
+            [ApprovedIdentityLink(customer_key, opaque_phone(1))],
+            messages=[
+                message("studio-old", customer_key, "studio", "2026-07-01T09:00:00+08:00", 1),
+                message("customer-late", customer_key, "customer", "2026-07-09T09:00:01+08:00", 2),
+                message("studio-future", customer_key, "studio", "2026-07-14T09:00:00+08:00", 3),
+                message("customer-future", customer_key, "customer", "2026-07-14T10:00:00+08:00", 4),
+            ],
+        )
+        profile = snapshot.profiles[0]
+        self.assertEqual(profile.customer_reply_rhythm.observation_count, 0)
+        self.assertEqual(profile.customer_reply_rhythm.preference_state, "insufficient_evidence")
+        self.assertIsNone(profile.median_reply_delay_seconds)
+        self.assertEqual(profile.customer_message_rhythm.observation_count, 1)
+
+    def test_message_and_order_month_buckets_and_exact_hours_are_point_in_time(self) -> None:
+        customer_key = opaque_customer(1)
+        phone_hmac = opaque_phone(1)
+        orders = [
+            order(
+                f"order-{index}",
+                phone_hmac,
+                paid_at[:10],
+                10_000,
+                ordered_at=ordered_at,
+                paid_at=paid_at,
+            )
+            for index, (ordered_at, paid_at) in enumerate(
+                (
+                    ("2026-06-01T08:00:00+08:00", "2026-06-01T09:00:00+08:00"),
+                    ("2026-06-09T08:30:00+08:00", "2026-06-09T09:30:00+08:00"),
+                    ("2026-06-15T08:00:00+08:00", "2026-06-15T21:00:00+08:00"),
+                    ("2026-06-22T08:00:00+08:00", "2026-06-22T21:30:00+08:00"),
+                    ("2026-07-13T19:00:00+08:00", "2026-07-13T19:30:00+08:00"),
+                    # After the 20:00 cutoff and therefore excluded.
+                    ("2026-07-13T20:30:00+08:00", "2026-07-13T20:45:00+08:00"),
+                ),
+                start=1,
+            )
+        ]
+        snapshot = self.build(
+            [ApprovedIdentityLink(customer_key, phone_hmac)],
+            orders=orders,
+            messages=[
+                message("early", customer_key, "customer", "2026-07-05T07:00:00+08:00", 1),
+                message("mid", customer_key, "customer", "2026-06-15T12:30:00+08:00", 2),
+                message("late", customer_key, "customer", "2026-06-25T19:00:00+08:00", 3),
+            ],
+        )
+        profile = snapshot.profiles[0]
+        self.assertEqual(profile.customer_message_rhythm.month_bucket_counts, (1, 1, 1))
+        self.assertEqual(profile.order_rhythm.observation_count, 5)
+        self.assertEqual(profile.order_rhythm.hour_counts[8], 4)
+        self.assertEqual(profile.order_rhythm.hour_counts[19], 1)
+        self.assertEqual(profile.order_rhythm.month_bucket_counts, (2, 2, 1))
+        self.assertEqual(profile.order_rhythm.preferred_period, "morning")
+        self.assertEqual(profile.payment_rhythm.observation_count, 5)
+        self.assertEqual(profile.payment_rhythm.hour_counts[9], 2)
+        self.assertEqual(profile.payment_rhythm.hour_counts[21], 2)
+        self.assertEqual(profile.payment_rhythm.hour_counts[19], 1)
+        self.assertEqual(profile.payment_rhythm.month_bucket_counts, (2, 2, 1))
+        self.assertEqual(profile.rfm_frequency, 5)
+
+    def test_zeroed_dashboard_clocks_never_become_midnight_preferences(self) -> None:
+        customer_key = opaque_customer(1)
+        phone_hmac = opaque_phone(1)
+        rows = [
+            order(
+                "order-%d" % index,
+                phone_hmac,
+                paid_at[:10],
+                10_000,
+                ordered_at=ordered_at,
+                paid_at=paid_at,
+            )
+            for index, (ordered_at, paid_at) in enumerate(
+                (
+                    ("2026-06-01T00:00:00+08:00", "2026-06-01T00:00:00+08:00"),
+                    ("2026-06-05T00:00:00+08:00", "2026-06-05T00:00:00+08:00"),
+                    ("2026-06-11T00:00:00+08:00", "2026-06-11T00:00:00+08:00"),
+                    ("2026-06-18T00:00:00+08:00", "2026-06-18T00:00:00+08:00"),
+                    ("2026-06-25T00:00:00+08:00", "2026-06-25T00:00:00+08:00"),
+                    # Same calendar day as the cutoff: the unknown clock must
+                    # not admit it into a historical point-in-time profile.
+                    ("2026-07-13T00:00:00+08:00", "2026-07-13T00:00:00+08:00"),
+                ),
+                start=1,
+            )
+        ]
+        profile = self.build(
+            [ApprovedIdentityLink(customer_key, phone_hmac)],
+            orders=rows,
+            messages=[],
+        ).profiles[0]
+        self.assertEqual(profile.rfm_frequency, 5)
+        self.assertEqual(profile.order_rhythm.observation_count, 0)
+        self.assertEqual(profile.payment_rhythm.observation_count, 0)
+        self.assertEqual(profile.order_rhythm.preference_state, "insufficient_evidence")
+        self.assertEqual(profile.payment_rhythm.preference_state, "insufficient_evidence")
+        self.assertIn("order_clock_time_unknown", profile.quality_flags)
+        self.assertIn("payment_clock_time_unknown", profile.quality_flags)
 
     def test_insufficient_contact_evidence_returns_manual_business_hours(self) -> None:
         snapshot = self.build(

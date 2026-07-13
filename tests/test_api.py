@@ -10,8 +10,16 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from wechat_cs.api import ApiHandler, create_server
+from wechat_cs.api import ApiError, ApiHandler, create_server
 from wechat_cs.build import build_database
+from wechat_cs.kimi_client import (
+    KimiClientError,
+    KimiCredentialError,
+    KimiHttpError,
+    KimiInvalidJsonError,
+    KimiNetworkError,
+    KimiSchemaError,
+)
 
 
 FIXTURE_EXPORT = Path(__file__).parent / "fixtures" / "export"
@@ -222,6 +230,92 @@ class ApiIntegrationTests(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertEqual(set(payload), {"error"})
         self.assertEqual(payload["error"]["code"], "invalid_level")
+
+
+class KimiApiAdapterTests(unittest.TestCase):
+    def test_shared_client_receives_api_model_temperature_and_timeout(self) -> None:
+        messages = ({"role": "user", "content": "synthetic prompt"},)
+        expected = {"draft_text": "synthetic draft"}
+        with mock.patch.dict(
+            os.environ,
+            {
+                "KIMI_API_KEY": "synthetic-key",
+                "KIMI_BASE_URL": "https://synthetic.invalid/v1/",
+                "KIMI_MODEL": "synthetic-model",
+                "KIMI_TIMEOUT_SECONDS": "17.5",
+            },
+        ), mock.patch("wechat_cs.api.KimiJsonClient") as client_class:
+            client_class.return_value.complete_json.return_value = expected
+
+            result = ApiHandler._call_kimi(None, messages)
+
+        self.assertEqual(result, expected)
+        client_class.assert_called_once_with()
+        client_class.return_value.complete_json.assert_called_once_with(
+            messages,
+            model="synthetic-model",
+            temperature=0.2,
+            timeout_seconds=17.5,
+        )
+
+    def test_api_timeout_keeps_the_existing_safe_bounds(self) -> None:
+        messages = ({"role": "user", "content": "synthetic prompt"},)
+        for configured, expected in (("0", 5.0), ("500", 120.0)):
+            with self.subTest(configured=configured), mock.patch.dict(
+                os.environ, {"KIMI_TIMEOUT_SECONDS": configured}
+            ), mock.patch("wechat_cs.api.KimiJsonClient") as client_class:
+                client_class.return_value.complete_json.return_value = {}
+
+                ApiHandler._call_kimi(None, messages)
+
+                self.assertEqual(
+                    client_class.return_value.complete_json.call_args.kwargs[
+                        "timeout_seconds"
+                    ],
+                    expected,
+                )
+
+    def test_request_side_client_errors_use_safe_stable_api_error(self) -> None:
+        failures = (
+            KimiClientError("private-provider-detail"),
+            KimiCredentialError("private-provider-detail"),
+            KimiHttpError(502, retryable=True),
+            KimiNetworkError("private-provider-detail"),
+        )
+        for failure in failures:
+            with self.subTest(category=failure.category), mock.patch(
+                "wechat_cs.api.KimiJsonClient"
+            ) as client_class:
+                client_class.return_value.complete_json.side_effect = failure
+                with self.assertRaises(ApiError) as raised:
+                    ApiHandler._call_kimi(None, ({"role": "user", "content": "synthetic"},))
+
+            error = raised.exception
+            self.assertEqual(error.status, 502)
+            self.assertEqual(error.code, "kimi_request_failed")
+            self.assertEqual(error.message, "Kimi 暂时不可用，未生成任何模拟回复")
+            self.assertTrue(error.extra["grounding_missing"])
+            self.assertNotIn("private-provider-detail", error.message)
+
+    def test_invalid_json_and_schema_errors_use_invalid_response_code(self) -> None:
+        failures = (
+            KimiInvalidJsonError("private-response-content"),
+            KimiSchemaError("private-response-content"),
+        )
+        for failure in failures:
+            with self.subTest(category=failure.category), mock.patch(
+                "wechat_cs.api.KimiJsonClient"
+            ) as client_class:
+                client_class.return_value.complete_json.side_effect = failure
+                with self.assertRaises(ApiError) as raised:
+                    ApiHandler._call_kimi(None, ({"role": "user", "content": "synthetic"},))
+
+            error = raised.exception
+            self.assertEqual(error.status, 502)
+            self.assertEqual(error.code, "kimi_invalid_response")
+            self.assertEqual(error.message, "Kimi 返回格式异常，未保存草稿")
+            self.assertTrue(error.extra["grounding_missing"])
+            self.assertNotIn("private-response-content", error.message)
 
 
 if __name__ == "__main__":

@@ -17,12 +17,20 @@ from .build import (
 )
 from .core import DEFAULT_HMAC_SECRET
 from .identity import import_bindings, import_feishu_order_bindings
+from .member_facts import import_member_facts
 from .orders import import_orders
 from .review_stages import (
     STAGE_TARGETS,
     get_review_status,
     import_review_annotations,
     prepare_review_batch,
+)
+from .sales_profile_generation import run_sales_profile_pilot
+from .sales_profile_pilot import (
+    DEFAULT_AS_OF_AT as DEFAULT_SALES_PROFILE_AS_OF_AT,
+    DEFAULT_MODEL as DEFAULT_SALES_PROFILE_MODEL,
+    DEFAULT_SOURCE_RUN_ID as DEFAULT_SALES_PROFILE_SOURCE_RUN_ID,
+    prepare_sales_profile_pilot,
 )
 from .store import (
     get_health,
@@ -127,6 +135,43 @@ def make_parser() -> argparse.ArgumentParser:
     )
     orders.add_argument("--db", required=True)
     orders.add_argument("--orders", required=True)
+
+    member_facts = subparsers.add_parser(
+        "import-member-facts",
+        help="import versioned birthday and preference facts from a read-only member cache",
+    )
+    member_facts.add_argument("--db", required=True)
+    member_facts.add_argument("--members", required=True)
+
+    prepare_sales_profile = subparsers.add_parser(
+        "prepare-sales-profile-pilot",
+        help="freeze the deterministic 50-person review cohort without calling Kimi",
+    )
+    prepare_sales_profile.add_argument("--db", required=True)
+    prepare_sales_profile.add_argument(
+        "--as-of",
+        default=DEFAULT_SALES_PROFILE_AS_OF_AT,
+        help="timezone-aware historical cutoff",
+    )
+    prepare_sales_profile.add_argument(
+        "--source-run",
+        default=DEFAULT_SALES_PROFILE_SOURCE_RUN_ID,
+        help="fixed normalized source run",
+    )
+    prepare_sales_profile.add_argument(
+        "--model", default=DEFAULT_SALES_PROFILE_MODEL
+    )
+
+    run_sales_profile = subparsers.add_parser(
+        "run-sales-profile-pilot",
+        help="generate Kimi profiles for a previously frozen review cohort",
+    )
+    run_sales_profile.add_argument("--db", required=True)
+    run_sales_profile.add_argument("--events", required=True)
+    run_sales_profile.add_argument("--accounts-config", required=True)
+    run_sales_profile.add_argument("--run-id", default="latest")
+    run_sales_profile.add_argument("--resume", action="store_true")
+    run_sales_profile.add_argument("--concurrency", type=int, default=2)
 
     action_queue = subparsers.add_parser(
         "build-action-queue",
@@ -262,6 +307,42 @@ def main(argv=None) -> int:
             )
         elif args.command == "import-orders":
             _print(import_orders(db_path=Path(args.db), orders_path=Path(args.orders)))
+        elif args.command == "import-member-facts":
+            _print(
+                import_member_facts(
+                    db_path=Path(args.db),
+                    source_path=Path(args.members),
+                    secret=os.environ.get(
+                        "WECHAT_CS_HMAC_SECRET", DEFAULT_HMAC_SECRET
+                    ),
+                )
+            )
+        elif args.command == "prepare-sales-profile-pilot":
+            _print(
+                prepare_sales_profile_pilot(
+                    Path(args.db),
+                    as_of_at=args.as_of,
+                    source_run_id=args.source_run,
+                    model=args.model,
+                    secret=os.environ.get(
+                        "WECHAT_CS_HMAC_SECRET", DEFAULT_HMAC_SECRET
+                    ),
+                )
+            )
+        elif args.command == "run-sales-profile-pilot":
+            _print(
+                run_sales_profile_pilot(
+                    Path(args.db),
+                    events_path=Path(args.events),
+                    accounts_path=Path(args.accounts_config),
+                    sales_profile_run_id=args.run_id,
+                    resume=args.resume,
+                    concurrency=args.concurrency,
+                    secret=os.environ.get(
+                        "WECHAT_CS_HMAC_SECRET", DEFAULT_HMAC_SECRET
+                    ),
+                )
+            )
         elif args.command == "build-action-queue":
             _print(
                 build_action_artifacts(
