@@ -81,7 +81,7 @@ python3 -m wechat_cs build-action-queue \
 
 ## 4. Kimi 50 人销售画像试点（离线、仅审核）
 
-先备份 run 数据库，再从 Dashboard 的只读快照导入最新订单和会员事实，然后冻结 50 人名单。所有命令必须使用创建该 run 时相同的 `WECHAT_CS_HMAC_SECRET`。`prepare-sales-profile-pilot` 默认固定使用 run `20260713T140730+0800-833c3257`、截止时间 `2026-07-13T20:14:37+08:00` 和模型 `kimi-k2.6`；该步骤不会调用 Kimi。
+先备份 run 数据库，再从 Dashboard 的只读快照导入最新订单和会员事实，然后冻结 50 人名单。所有命令必须使用创建该 run 时相同的 `WECHAT_CS_HMAC_SECRET`。`prepare-sales-profile-pilot` 默认固定使用 run `20260713T140730+0800-833c3257`、截止时间 `2026-07-13T20:14:37+08:00` 和模型 `kimi-k2.7-code`；该步骤不会调用 Kimi。同一名单切换模型时会创建独立版本化 run，不覆盖旧结果。
 
 ```bash
 python3 -m wechat_cs import-orders \

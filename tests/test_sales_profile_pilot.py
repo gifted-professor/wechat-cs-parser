@@ -9,7 +9,11 @@ from pathlib import Path
 from unittest.mock import patch
 
 from tests.test_sales_profile_sampling import rich_candidate_pool
-from wechat_cs.sales_profile_pilot import _order_is_complex_at, prepare_sales_profile_pilot
+from wechat_cs.sales_profile_pilot import (
+    DEFAULT_MODEL,
+    _order_is_complex_at,
+    prepare_sales_profile_pilot,
+)
 from wechat_cs.store import initialize_m0_run, open_store
 
 
@@ -149,6 +153,8 @@ class PrepareSalesProfilePilotTests(unittest.TestCase):
             self.assertGreaterEqual(first["birthday_match_count"], 5)
             self.assertFalse(first["model_called"])
             self.assertFalse(first["send_allowed"])
+            self.assertEqual(first["model"], "kimi-k2.7-code")
+            self.assertEqual(DEFAULT_MODEL, "kimi-k2.7-code")
             self.assertEqual(refresh.call_count, 2)
             kimi.assert_not_called()
             self.assertNotIn("phone_", json.dumps(first, sort_keys=True))
@@ -172,6 +178,76 @@ class PrepareSalesProfilePilotTests(unittest.TestCase):
                 self.assertEqual(
                     quality,
                     {"acceptance_gates": {"m0_a": True, "m0_b": True, "m0_c": False}},
+                )
+            finally:
+                connection.close()
+
+    def test_same_cohort_with_different_model_creates_versioned_run(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = self._database(Path(temp_dir).resolve())
+            pool = [replace(item, feature_snapshot_id=None) for item in rich_candidate_pool()]
+            connection = open_store(str(db_path))
+            try:
+                with connection:
+                    for item in pool:
+                        connection.execute(
+                            """
+                            INSERT INTO customers(
+                                customer_key,display_name,last_active_at,opportunity_score,
+                                opportunity_level,summary,reasons_json,evidence_json,memory_json,
+                                source_file
+                            ) VALUES(?, 'fixture', ?, 0, 'low', 'fixture', '[]', '[]', '{}',
+                                     'events.jsonl')
+                            """,
+                            (item.customer_key, AS_OF),
+                        )
+            finally:
+                connection.close()
+
+            with (
+                patch(
+                    "wechat_cs.sales_profile_pilot.refresh_sales_profile_features",
+                    return_value={"feature_snapshots": len(pool)},
+                ),
+                patch(
+                    "wechat_cs.sales_profile_pilot.load_sampling_candidates",
+                    return_value=tuple(pool),
+                ),
+            ):
+                k27 = prepare_sales_profile_pilot(
+                    db_path,
+                    as_of_at=AS_OF,
+                    source_run_id=RUN_ID,
+                    model="kimi-k2.7-code",
+                    secret=SECRET,
+                )
+                k26 = prepare_sales_profile_pilot(
+                    db_path,
+                    as_of_at=AS_OF,
+                    source_run_id=RUN_ID,
+                    model="kimi-k2.6",
+                    secret=SECRET,
+                )
+                k27_again = prepare_sales_profile_pilot(
+                    db_path,
+                    as_of_at=AS_OF,
+                    source_run_id=RUN_ID,
+                    model="kimi-k2.7-code",
+                    secret=SECRET,
+                )
+
+            self.assertNotEqual(k27["sales_profile_run_id"], k26["sales_profile_run_id"])
+            self.assertEqual(k27["sales_profile_run_id"], k27_again["sales_profile_run_id"])
+            self.assertTrue(k27_again["idempotent"])
+            connection = open_store(str(db_path), read_only=True)
+            try:
+                self.assertEqual(
+                    connection.execute("SELECT COUNT(*) FROM sales_profile_runs").fetchone()[0],
+                    2,
+                )
+                self.assertEqual(
+                    connection.execute("SELECT COUNT(*) FROM sales_profile_subjects").fetchone()[0],
+                    100,
                 )
             finally:
                 connection.close()

@@ -37,7 +37,7 @@ from .store import initialize_schema, open_store
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 DEFAULT_SOURCE_RUN_ID = "20260713T140730+0800-833c3257"
 DEFAULT_AS_OF_AT = "2026-07-13T20:14:37+08:00"
-DEFAULT_MODEL = "kimi-k2.6"
+DEFAULT_MODEL = "kimi-k2.7-code"
 EXTRACTION_PROMPT_VERSION = "sales-events-v1"
 PROFILE_PROMPT_VERSION = "sales-profile-v1"
 PROFILE_SCHEMA_VERSION = "sales-profile-card-v1"
@@ -381,8 +381,20 @@ def prepare_sales_profile_pilot(
         cohort_payload = [
             (item.customer_key, item.stratum, item.stratum_rank) for item in selected
         ]
+        # Bind additive run uniqueness to the complete generation contract so
+        # the same frozen people can be evaluated by a newer model without
+        # overwriting or colliding with an earlier pilot.
         cohort_hash = hashlib.sha256(
-            json_dumps(cohort_payload).encode("utf-8")
+            json_dumps(
+                {
+                    "subjects": cohort_payload,
+                    "model": model,
+                    "extraction_prompt_version": EXTRACTION_PROMPT_VERSION,
+                    "profile_prompt_version": PROFILE_PROMPT_VERSION,
+                    "profile_schema_version": PROFILE_SCHEMA_VERSION,
+                    "sampling_version": SAMPLING_VERSION,
+                }
+            ).encode("utf-8")
         ).hexdigest()
         run_id = hmac_id(
             actual_secret,
