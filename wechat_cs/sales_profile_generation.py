@@ -79,6 +79,13 @@ CARD_FIELDS = (
     "unknowns",
     "evidence",
 )
+_REDACTION_PLACEHOLDER = re.compile(
+    r"\[(?:身份证|地址|姓名|手机号|邮箱|链接|微信号|金额|日期|单号|库存状态|物流状态|退款结论|时效承诺)\]"
+)
+_UNSUPPORTED_RESOLUTION_CLAIM = re.compile(
+    r"(?:售后|退款|退货).{0,10}(?:处理完|已处理|解决完|已解决|完成|结束)"
+    r"|(?:处理完|已处理|解决完|已解决).{0,10}(?:售后|退款|退货)"
+)
 
 
 @dataclass(frozen=True)
@@ -105,6 +112,14 @@ class _GeneratedSubject:
 
 def _normalized_text(value: object) -> str:
     return re.sub(r"\s+", " ", unicodedata.normalize("NFKC", str(value or ""))).strip()
+
+
+def _sanitize_model_fact_text(value: object) -> object:
+    if not isinstance(value, str):
+        return value
+    cleaned = _REDACTION_PLACEHOLDER.sub(" ", value)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" -_/；;,，")
+    return cleaned or None
 
 
 def _event_id(
@@ -233,6 +248,8 @@ def _validate_card(
         raise KimiSchemaError("sales profile card is missing required fields")
     if not isinstance(payload["natural_opening"], str) or not payload["natural_opening"].strip():
         raise KimiSchemaError("sales profile natural_opening must be non-empty")
+    if _UNSUPPORTED_RESOLUTION_CLAIM.search(payload["natural_opening"]):
+        raise KimiSchemaError("sales profile natural_opening claims unsupported resolution")
     for field in ("purchase_drivers", "historical_commitments", "risks", "unknowns", "evidence"):
         if not isinstance(payload[field], list):
             raise KimiSchemaError("sales profile %s must be a list" % field)
@@ -283,6 +300,15 @@ def _load_deterministic_facts(
                 "size", "order_note", "refund_type", "refund_amount_minor", "refund_on",
             )
         }
+        for text_field in (
+            "sku_name",
+            "factory",
+            "category",
+            "color",
+            "size",
+            "order_note",
+        ):
+            item[text_field] = _sanitize_model_fact_text(item.get(text_field))
         try:
             quality_flags = json.loads(str(row["quality_flags_json"] or "[]"))
         except json.JSONDecodeError:
@@ -467,6 +493,35 @@ def _extract_prompt(chunk: Sequence[RawSalesMessage], facts: Mapping[str, object
                     ],
                     "orders": facts["orders"],
                     "allowed_event_types": sorted(EVENT_TYPES),
+                    "strict_output_contract": {
+                        "events": [
+                            {
+                                "event_type": "one allowed_event_types value",
+                                "summary": "string",
+                                "confidence": "number from 0 to 1",
+                                "evidence": [
+                                    {
+                                        "kind": "message",
+                                        "message_key": "exact supplied message_key",
+                                        "quote": "exact substring from that message text",
+                                    },
+                                    {
+                                        "kind": "order",
+                                        "order_line_id": "exact supplied order_line_id",
+                                        "field": "exact supplied order field name",
+                                        "value": "exact JSON value from that order field",
+                                    },
+                                ],
+                            }
+                        ]
+                    },
+                    "output_rules": [
+                        "Return exactly one JSON object with only the events top-level key.",
+                        "Every event must contain event_type, summary, confidence, evidence.",
+                        "evidence must always be a non-empty JSON array, never a string or object.",
+                        "Do not invent alternate fields such as details, event_time, sub_type, or order_line_id at event top level.",
+                        "Return {\"events\":[]} when no event has valid evidence.",
+                    ],
                 }
             ),
         },
@@ -490,7 +545,29 @@ def _profile_prompt(facts: Mapping[str, object], events: Sequence[Mapping[str, o
                     "task": "synthesize_sales_profile",
                     "prompt_version": PROFILE_PROMPT_VERSION,
                     "schema_version": PROFILE_SCHEMA_VERSION,
-                    "required_fields": list(CARD_FIELDS),
+                    "strict_output_contract": {
+                        "customer_value": {"summary": "string", "facts": ["string"]},
+                        "product_preferences": {"summary": "string", "items": ["string"]},
+                        "time_rhythm": {"summary": "string", "best_contact_time": "string or 未知"},
+                        "purchase_drivers": ["string"],
+                        "historical_commitments": ["string"],
+                        "current_opportunity": {"summary": "string"},
+                        "contact_reason": "string",
+                        "natural_opening": "string",
+                        "risks": ["string"],
+                        "unknowns": ["string"],
+                        "evidence": [
+                            {"sales_profile_event_id": "exact accepted event id"}
+                        ],
+                    },
+                    "output_rules": [
+                        "Return exactly one JSON object with all 11 strict_output_contract keys.",
+                        "purchase_drivers, historical_commitments, risks, unknowns, evidence must be JSON arrays even when empty.",
+                        "Do not rename keys or replace arrays with objects.",
+                        "Every evidence item must cite an exact supplied sales_profile_event_id; use [] when none applies.",
+                        "Never claim an aftersales, refund, or return was completed, resolved, or handled unless an accepted event explicitly proves completion.",
+                        "For aftersales or complex-risk customers, natural_opening must be service-first: ask about the prior experience before mentioning new products.",
+                    ],
                     "deterministic_facts": facts,
                     "validated_events": list(events),
                 }
@@ -654,6 +731,17 @@ def run_sales_profile_pilot(
         if str(run["sampling_version"]) != SAMPLING_VERSION:
             raise RuntimeError(
                 "sales profile pilot run uses an obsolete sampling version; prepare again"
+            )
+        expected_prompt_version = "%s+%s" % (
+            EXTRACTION_PROMPT_VERSION,
+            PROFILE_PROMPT_VERSION,
+        )
+        if (
+            str(run["prompt_version"]) != expected_prompt_version
+            or str(run["profile_schema_version"]) != PROFILE_SCHEMA_VERSION
+        ):
+            raise RuntimeError(
+                "sales profile pilot run uses an obsolete prompt or schema version; prepare again"
             )
         source_run = connection.execute(
             "SELECT hmac_key_fingerprint,account_config_hash FROM pipeline_runs WHERE run_id=?",

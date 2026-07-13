@@ -9,10 +9,16 @@ from unittest.mock import patch
 
 from wechat_cs.kimi_client import KimiSchemaError
 from wechat_cs.sales_profile_generation import (
+    _validate_card,
     _load_deterministic_facts,
     _stage_temperature,
     run_sales_profile_pilot,
     validate_extracted_events,
+)
+from wechat_cs.sales_profile_pilot import (
+    EXTRACTION_PROMPT_VERSION,
+    PROFILE_PROMPT_VERSION,
+    PROFILE_SCHEMA_VERSION,
 )
 from wechat_cs.sales_profile_raw import RawConversationSnapshot, RawSalesMessage
 from wechat_cs.sales_profile_sampling import SAMPLING_VERSION
@@ -264,6 +270,17 @@ class EventValidationTests(unittest.TestCase):
                 chunk_index=0,
             )
 
+    def test_card_rejects_unsupported_aftersales_resolution_claim(self) -> None:
+        card = FakeKimiClient().complete_json(
+            [{"content": json.dumps({"task": "synthesize_sales_profile"})}],
+            "kimi-k2.7-code",
+            0.2,
+            120,
+        )
+        card["natural_opening"] = "之前两单售后都处理完了，我给您看看新款。"
+        with self.assertRaisesRegex(KimiSchemaError, "unsupported resolution"):
+            _validate_card(card, accepted_event_ids=set())
+
 
 class SalesProfileGenerationTests(unittest.TestCase):
     def _database(self, root: Path) -> tuple[Path, tuple[str, str]]:
@@ -326,10 +343,18 @@ class SalesProfileGenerationTests(unittest.TestCase):
                         sales_profile_run_id,source_run_id,as_of_at,status,model,prompt_version,
                         profile_schema_version,sampling_version,message_snapshot_id,
                         order_snapshot_id,cohort_hash,created_at
-                    ) VALUES(?,?,?,'prepared','kimi-k2.6','events+profile','card-v1',?,
+                    ) VALUES(?,?,?,'prepared','kimi-k2.6',?, ?,?,
                              'events-snapshot','orders-active','cohort',?)
                     """,
-                    (PILOT_RUN_ID, SOURCE_RUN_ID, AS_OF, SAMPLING_VERSION, AS_OF),
+                    (
+                        PILOT_RUN_ID,
+                        SOURCE_RUN_ID,
+                        AS_OF,
+                        EXTRACTION_PROMPT_VERSION + "+" + PROFILE_PROMPT_VERSION,
+                        PROFILE_SCHEMA_VERSION,
+                        SAMPLING_VERSION,
+                        AS_OF,
+                    ),
                 )
                 for index, customer in enumerate(customers, start=1):
                     subject = f"subject-{index}"
@@ -356,9 +381,16 @@ class SalesProfileGenerationTests(unittest.TestCase):
                         INSERT INTO sales_profiles(
                             sales_profile_id,subject_id,status,model,prompt_version,
                             profile_schema_version,created_at,updated_at
-                        ) VALUES(?,?,'pending','kimi-k2.6','profile-v1','card-v1',?,?)
+                        ) VALUES(?,?,'pending','kimi-k2.6',?,?,?,?)
                         """,
-                        (profile, subject, AS_OF, AS_OF),
+                        (
+                            profile,
+                            subject,
+                            PROFILE_PROMPT_VERSION,
+                            PROFILE_SCHEMA_VERSION,
+                            AS_OF,
+                            AS_OF,
+                        ),
                     )
         finally:
             connection.close()
@@ -522,12 +554,14 @@ class SalesProfileGenerationTests(unittest.TestCase):
                         INSERT INTO orders(
                             order_line_id,order_snapshot_id,source_namespace,record_id,
                             phone_hmac,ordered_at,paid_at,paid_on,revenue_minor,currency,
+                            sku_name,size,
                             refund_type,refund_amount_minor,refund_on,source_hash,
                             quality_flags_json
                         ) VALUES(
                             'order-frozen','orders-active','fixture','record-frozen',?,
                             '2026-06-01T00:00:00+08:00','2026-06-01T00:00:00+08:00',
-                            '2026-06-01',10000,'CNY','return',10000,'2026-08-01',
+                            '2026-06-01',10000,'CNY','阿迪贝壳头 黑色 [日期]','[日期]',
+                            'return',10000,'2026-08-01',
                             'frozen-source','["future_refund_on"]'
                         )
                         """,
@@ -628,6 +662,8 @@ class SalesProfileGenerationTests(unittest.TestCase):
             self.assertIsNone(orders["order-frozen"]["refund_type"])
             self.assertIsNone(orders["order-frozen"]["refund_on"])
             self.assertFalse(orders["order-frozen"]["refund_fact_at_cutoff"])
+            self.assertEqual(orders["order-frozen"]["sku_name"], "阿迪贝壳头 黑色")
+            self.assertIsNone(orders["order-frozen"]["size"])
             self.assertNotIn("future_refund_on", orders["order-frozen"]["quality_flags"])
             self.assertFalse(
                 any(
