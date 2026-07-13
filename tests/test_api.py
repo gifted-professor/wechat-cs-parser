@@ -104,6 +104,22 @@ class ApiIntegrationTests(unittest.TestCase):
         self.assertEqual(payload["error"]["code"], "unauthorized")
         self.assertEqual(headers.get("Cache-Control"), "no-store")
 
+    def test_rebinding_host_is_rejected_even_when_origin_matches(self) -> None:
+        status, _, payload = self.request(
+            "GET",
+            "/v1/health",
+            token=None,
+            headers={"Host": "rebind.example", "Origin": "http://rebind.example"},
+        )
+        self.assertEqual(status, 403)
+        self.assertEqual(payload["error"]["code"], "host_denied")
+
+    def test_server_cannot_start_without_an_api_token(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "WECHAT_CS_TOKEN is required"):
+            create_server(
+                host="127.0.0.1", port=0, db_path=self.db_path, token=""
+            )
+
     def test_health_reports_derived_counts_without_paths_or_identifiers(self) -> None:
         status, headers, payload = self.request("GET", "/v1/health")
         self.assertEqual(status, 200)

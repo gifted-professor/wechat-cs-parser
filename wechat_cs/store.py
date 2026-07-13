@@ -17,7 +17,7 @@ from .core import DEFAULT_HMAC_SECRET, hmac_id, json_dumps, parse_timestamp
 from .source_snapshot import assert_project_output, hmac_key_fingerprint
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 M0_ACCEPTANCE_GATES = ("m0_a", "m0_b", "m0_c", "m0_d", "integration")
 
@@ -294,6 +294,11 @@ def initialize_schema(connection: sqlite3.Connection) -> None:
             revenue_minor INTEGER,
             currency TEXT NOT NULL DEFAULT 'CNY',
             platform TEXT,
+            sku_name TEXT,
+            factory TEXT,
+            category TEXT,
+            color TEXT,
+            size TEXT,
             refund_type TEXT,
             refund_reason TEXT,
             refund_amount_minor INTEGER,
@@ -313,6 +318,7 @@ def initialize_schema(connection: sqlite3.Connection) -> None:
             card_type TEXT NOT NULL,
             as_of_at TEXT NOT NULL,
             boundary_ordinal INTEGER NOT NULL,
+            boundary_message_key TEXT,
             source_snapshot_id TEXT NOT NULL REFERENCES source_snapshots(snapshot_id),
             action_window_end TEXT NOT NULL,
             observation_until TEXT,
@@ -347,14 +353,212 @@ def initialize_schema(connection: sqlite3.Connection) -> None:
         );
         """
     )
+    # SQLite's CREATE TABLE IF NOT EXISTS does not add columns to a v2 database.
+    # Keep these alterations additive so a reviewed M0 run can be upgraded without
+    # recreating, replacing, or silently rewriting its source-derived rows.
+    _ensure_column(connection, "orders", "sku_name", "TEXT")
+    _ensure_column(connection, "orders", "factory", "TEXT")
+    _ensure_column(connection, "orders", "category", "TEXT")
+    _ensure_column(connection, "orders", "color", "TEXT")
+    _ensure_column(connection, "orders", "size", "TEXT")
+    _ensure_column(connection, "decision_cards", "boundary_message_key", "TEXT")
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS customer_value_snapshots (
+            feature_snapshot_id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL REFERENCES pipeline_runs(run_id) ON DELETE CASCADE,
+            customer_key TEXT NOT NULL REFERENCES customers(customer_key) ON DELETE CASCADE,
+            profile_id TEXT NOT NULL,
+            as_of_at TEXT NOT NULL,
+            message_snapshot_id TEXT NOT NULL REFERENCES source_snapshots(snapshot_id),
+            order_snapshot_id TEXT REFERENCES order_snapshots(order_snapshot_id)
+                ON DELETE SET NULL,
+            feature_rule_version TEXT NOT NULL,
+            profile_json TEXT NOT NULL,
+            freshness_json TEXT NOT NULL,
+            messages_fresh INTEGER NOT NULL CHECK(messages_fresh IN (0,1)),
+            orders_fresh INTEGER NOT NULL CHECK(orders_fresh IN (0,1)),
+            queue_ready INTEGER NOT NULL CHECK(queue_ready IN (0,1)),
+            created_at TEXT NOT NULL,
+            UNIQUE(run_id, customer_key, as_of_at, feature_rule_version)
+        );
+        CREATE INDEX IF NOT EXISTS customer_value_snapshots_customer_time
+            ON customer_value_snapshots(customer_key, as_of_at);
+
+        CREATE TABLE IF NOT EXISTS card_feature_snapshots (
+            card_id TEXT PRIMARY KEY REFERENCES decision_cards(card_id) ON DELETE CASCADE,
+            feature_snapshot_id TEXT NOT NULL
+                REFERENCES customer_value_snapshots(feature_snapshot_id),
+            feature_payload_json TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS action_annotations (
+            card_id TEXT PRIMARY KEY REFERENCES decision_cards(card_id) ON DELETE CASCADE,
+            customer_signal TEXT NOT NULL CHECK(customer_signal IN (
+                'positive','negative','mixed','unknown'
+            )),
+            reply_strategy TEXT NOT NULL CHECK(reply_strategy IN (
+                'answer_fact','clarify','recommend','quote','trust_proof',
+                'light_followup','aftersales_repair','handoff_human','other'
+            )),
+            reuse_status TEXT NOT NULL CHECK(reuse_status IN (
+                'direct','fill_slots','case_only','prohibited'
+            )),
+            required_facts_json TEXT NOT NULL DEFAULT '[]',
+            prohibited_claims_json TEXT NOT NULL DEFAULT '[]',
+            annotation_json TEXT NOT NULL DEFAULT '{}',
+            rule_version TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS card_annotations (
+            annotation_id TEXT PRIMARY KEY,
+            card_id TEXT NOT NULL REFERENCES decision_cards(card_id) ON DELETE CASCADE,
+            review_stage TEXT NOT NULL CHECK(review_stage IN (
+                'protocol_20','acceptance_100','gold_500'
+            )),
+            reviewer TEXT NOT NULL,
+            verdict TEXT NOT NULL CHECK(verdict IN ('approved','edited','rejected')),
+            labels_json TEXT NOT NULL DEFAULT '{}',
+            notes TEXT,
+            created_at TEXT NOT NULL,
+            UNIQUE(card_id, review_stage, reviewer)
+        );
+        CREATE INDEX IF NOT EXISTS card_annotations_stage
+            ON card_annotations(review_stage, verdict);
+
+        CREATE TABLE IF NOT EXISTS strategy_catalog (
+            strategy_key TEXT PRIMARY KEY,
+            strategy_level TEXT NOT NULL CHECK(strategy_level IN ('exact','coarse')),
+            parent_strategy_key TEXT REFERENCES strategy_catalog(strategy_key),
+            independent_customer_count INTEGER NOT NULL DEFAULT 0
+                CHECK(independent_customer_count >= 0),
+            statistics_visible INTEGER NOT NULL DEFAULT 0
+                CHECK(statistics_visible IN (0,1)),
+            metrics_json TEXT NOT NULL DEFAULT '{}',
+            version TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            CHECK(statistics_visible = 0 OR independent_customer_count >= 30)
+        );
+
+        CREATE TABLE IF NOT EXISTS action_queue_items (
+            action_id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL REFERENCES pipeline_runs(run_id) ON DELETE CASCADE,
+            feature_snapshot_id TEXT
+                REFERENCES customer_value_snapshots(feature_snapshot_id),
+            customer_key TEXT NOT NULL REFERENCES customers(customer_key) ON DELETE CASCADE,
+            profile_id TEXT NOT NULL,
+            queue_date TEXT NOT NULL,
+            lane TEXT NOT NULL CHECK(lane IN ('reply_now','proactive_today','suppressed')),
+            priority_score INTEGER NOT NULL,
+            priority_version TEXT NOT NULL,
+            phone_hmac TEXT,
+            reason_codes_json TEXT NOT NULL,
+            contact_window_json TEXT NOT NULL,
+            recommended_action TEXT NOT NULL,
+            strategy_version TEXT NOT NULL,
+            signals_json TEXT NOT NULL DEFAULT '{}',
+            required_facts_json TEXT NOT NULL DEFAULT '[]',
+            missing_facts_json TEXT NOT NULL DEFAULT '[]',
+            prohibited_claims_json TEXT NOT NULL DEFAULT '[]',
+            draft_json TEXT NOT NULL DEFAULT '{}',
+            confidence REAL CHECK(confidence IS NULL OR (confidence >= 0 AND confidence <= 1)),
+            freshness_json TEXT NOT NULL,
+            human_confirmation_state TEXT NOT NULL DEFAULT 'pending'
+                CHECK(human_confirmation_state IN ('pending','adopted','edited','rejected')),
+            send_allowed INTEGER NOT NULL DEFAULT 0 CHECK(send_allowed = 0),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(profile_id, queue_date, customer_key)
+        );
+        CREATE INDEX IF NOT EXISTS action_queue_items_profile_date_lane
+            ON action_queue_items(profile_id, queue_date, lane, priority_score DESC);
+        CREATE UNIQUE INDEX IF NOT EXISTS one_proactive_phone_per_day
+            ON action_queue_items(profile_id, queue_date, phone_hmac)
+            WHERE lane='proactive_today' AND phone_hmac IS NOT NULL;
+
+        CREATE TABLE IF NOT EXISTS action_queue_runs (
+            queue_run_id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL REFERENCES pipeline_runs(run_id) ON DELETE CASCADE,
+            profile_id TEXT NOT NULL,
+            queue_date TEXT NOT NULL,
+            as_of_at TEXT NOT NULL,
+            status TEXT NOT NULL CHECK(status IN ('ready','degraded_order_data','blocked')),
+            policy_version TEXT NOT NULL,
+            block_reasons_json TEXT NOT NULL DEFAULT '[]',
+            freshness_json TEXT NOT NULL,
+            counts_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE(profile_id, queue_date)
+        );
+        CREATE INDEX IF NOT EXISTS action_queue_runs_profile_date
+            ON action_queue_runs(profile_id, queue_date);
+
+        CREATE TABLE IF NOT EXISTS action_queue_feedback (
+            feedback_id TEXT PRIMARY KEY,
+            action_id TEXT NOT NULL REFERENCES action_queue_items(action_id) ON DELETE CASCADE,
+            outcome TEXT NOT NULL CHECK(outcome IN ('adopted','edited','rejected')),
+            final_text TEXT,
+            reason_codes_json TEXT NOT NULL DEFAULT '[]',
+            reviewer TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS action_queue_feedback_action_time
+            ON action_queue_feedback(action_id, created_at);
+
+        CREATE TABLE IF NOT EXISTS contact_suppressions (
+            suppression_id TEXT PRIMARY KEY,
+            customer_key TEXT NOT NULL REFERENCES customers(customer_key) ON DELETE CASCADE,
+            profile_id TEXT NOT NULL,
+            phone_hmac TEXT,
+            reason_code TEXT NOT NULL,
+            starts_at TEXT NOT NULL,
+            ends_at TEXT,
+            source_action_id TEXT REFERENCES action_queue_items(action_id),
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS contact_suppressions_customer_time
+            ON contact_suppressions(customer_key, starts_at, ends_at);
+        CREATE INDEX IF NOT EXISTS contact_suppressions_phone_time
+            ON contact_suppressions(phone_hmac, starts_at, ends_at)
+            WHERE phone_hmac IS NOT NULL;
+        """
+    )
+    _ensure_column(connection, "action_queue_items", "signals_json", "TEXT NOT NULL DEFAULT '{}'")
+    _ensure_column(
+        connection,
+        "action_queue_items",
+        "missing_facts_json",
+        "TEXT NOT NULL DEFAULT '[]'",
+    )
     applied_at = datetime.now().astimezone().isoformat(timespec="seconds")
     connection.execute(
         "INSERT OR IGNORE INTO schema_migrations(version,applied_at,checksum) VALUES(?,?,?)",
-        (SCHEMA_VERSION, applied_at, "wechat-cs-m0-schema-v2"),
+        (2, applied_at, "wechat-cs-m0-schema-v2"),
+    )
+    connection.execute(
+        "INSERT OR IGNORE INTO schema_migrations(version,applied_at,checksum) VALUES(?,?,?)",
+        (3, applied_at, "wechat-cs-action-queue-schema-v3"),
     )
     set_meta(connection, "schema_version", str(SCHEMA_VERSION))
     connection.execute("PRAGMA user_version = %d" % SCHEMA_VERSION)
     connection.commit()
+
+
+def _ensure_column(
+    connection: sqlite3.Connection,
+    table: str,
+    column: str,
+    declaration: str,
+) -> None:
+    """Add one known schema column without rebuilding or copying user data."""
+
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(%s)" % table)}
+    if column not in columns:
+        connection.execute(
+            "ALTER TABLE %s ADD COLUMN %s %s" % (table, column, declaration)
+        )
 
 
 def _migrate_role_calibration(connection: sqlite3.Connection) -> None:

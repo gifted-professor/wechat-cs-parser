@@ -16,6 +16,31 @@ SECRET = "orders-fixture-secret-with-at-least-32-characters"
 
 
 class OrderPrimitiveTests(unittest.TestCase):
+    def test_product_candidate_fields_are_normalized_without_customer_pii(self) -> None:
+        order = normalize_order(
+            {
+                "record_id": "product-facts",
+                "phone": "13800138000",
+                "pay_date": "2026-07-01",
+                "revenue": 299,
+                "sku_name": "羊毛开衫",
+                "factory": "样衣工厂",
+                "category": "针织衫",
+                "color": "雾霾蓝",
+                "size": "M",
+            },
+            synced_at=parse_synced_at("2026-07-13T12:00:00+08:00"),
+            secret=SECRET,
+            source_hash="fixture-source-hash",
+        )
+        self.assertEqual(order.sku_name, "羊毛开衫")
+        self.assertEqual(order.factory, "样衣工厂")
+        self.assertEqual(order.category, "针织衫")
+        self.assertEqual(order.color, "雾霾蓝")
+        self.assertEqual(order.size, "M")
+        serialized = json.dumps(order.__dict__, ensure_ascii=False)
+        self.assertNotIn("13800138000", serialized)
+
     def test_supplier_payment_never_creates_customer_purchase(self) -> None:
         order = normalize_order(
             {
@@ -103,6 +128,33 @@ class OrderImportTests(unittest.TestCase):
             for unsafe in (b"13800138000", "联系人张三".encode("utf-8"), b"YT1111111111"):
                 self.assertNotIn(unsafe, serialized)
 
+    def test_import_persists_product_candidates_as_local_facts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir).resolve()
+            db_path = self._working_db(root)
+            document = json.loads(ORDERS_FIXTURE.read_text(encoding="utf-8"))
+            document["records"][0].update(
+                {
+                    "sku_name": "羊毛开衫",
+                    "factory": "样衣工厂",
+                    "category": "针织衫",
+                    "color": "雾霾蓝",
+                    "size": "M",
+                }
+            )
+            source = root / "orders-with-product.json"
+            source.write_text(json.dumps(document, ensure_ascii=False), encoding="utf-8")
+            import_orders(db_path, source, secret=SECRET)
+            connection = open_store(str(db_path), read_only=True)
+            try:
+                row = connection.execute(
+                    "SELECT sku_name,factory,category,color,size FROM orders "
+                    "WHERE record_id='order-normal'"
+                ).fetchone()
+                self.assertEqual(tuple(row), ("羊毛开衫", "样衣工厂", "针织衫", "雾霾蓝", "M"))
+            finally:
+                connection.close()
+
     def test_failed_import_preserves_previous_active_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir).resolve()
@@ -119,6 +171,37 @@ class OrderImportTests(unittest.TestCase):
                 ).fetchone()
                 self.assertEqual(active["order_snapshot_id"], imported["order_snapshot_id"])
                 self.assertEqual(connection.execute("SELECT COUNT(*) FROM orders").fetchone()[0], 11)
+            finally:
+                connection.close()
+
+    def test_new_import_versions_instead_of_rewriting_the_prior_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir).resolve()
+            db_path = self._working_db(root)
+            first = import_orders(db_path, ORDERS_FIXTURE, secret=SECRET)
+            document = json.loads(ORDERS_FIXTURE.read_text(encoding="utf-8"))
+            document["synced_at"] = "2026-07-13T13:00:00+08:00"
+            document["records"][0]["revenue"] = 209
+            changed = root / "orders-next.json"
+            changed.write_text(json.dumps(document, ensure_ascii=False), encoding="utf-8")
+            second = import_orders(db_path, changed, secret=SECRET)
+
+            self.assertNotEqual(first["order_snapshot_id"], second["order_snapshot_id"])
+            connection = open_store(str(db_path), read_only=True)
+            try:
+                states = {
+                    row["order_snapshot_id"]: row["state"]
+                    for row in connection.execute(
+                        "SELECT order_snapshot_id,state FROM order_snapshots"
+                    )
+                }
+                self.assertEqual(states[first["order_snapshot_id"]], "superseded")
+                self.assertEqual(states[second["order_snapshot_id"]], "active")
+                self.assertEqual(
+                    connection.execute("SELECT COUNT(*) FROM orders").fetchone()[0],
+                    22,
+                )
+                self.assertEqual(connection.execute("PRAGMA foreign_key_check").fetchall(), [])
             finally:
                 connection.close()
 
