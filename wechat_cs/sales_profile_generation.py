@@ -499,6 +499,14 @@ def _profile_prompt(facts: Mapping[str, object], events: Sequence[Mapping[str, o
     )
 
 
+def _stage_temperature(model: str, *, synthesis: bool) -> float:
+    # Kimi Code's stable membership aliases reject every temperature except 1.
+    # Open Platform models retain the deterministic pilot settings.
+    if model in {"kimi-for-coding", "kimi-for-coding-highspeed"}:
+        return 1.0
+    return 0.2 if synthesis else 0.0
+
+
 def _generate_one(subject: _SubjectInput, client: KimiJsonClient) -> _GeneratedSubject:
     events = []
     try:
@@ -506,7 +514,7 @@ def _generate_one(subject: _SubjectInput, client: KimiJsonClient) -> _GeneratedS
             payload = client.complete_json(
                 _extract_prompt(chunk, subject.deterministic_facts),
                 subject.model,
-                0.0,
+                _stage_temperature(subject.model, synthesis=False),
                 120,
             )
             events.extend(
@@ -522,7 +530,7 @@ def _generate_one(subject: _SubjectInput, client: KimiJsonClient) -> _GeneratedS
         card_payload = client.complete_json(
             _profile_prompt(subject.deterministic_facts, accepted),
             subject.model,
-            0.2,
+            _stage_temperature(subject.model, synthesis=True),
             120,
         )
         card = _validate_card(

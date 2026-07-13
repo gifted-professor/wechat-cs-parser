@@ -96,6 +96,8 @@ python3 -m wechat_cs prepare-sales-profile-pilot \
 
 人工确认冻结结果后，才配置密钥并生成画像。生成命令只处理已冻结名单；单客失败不会阻断其余客户，`--resume` 只用于续跑失败项。
 
+若使用 Kimi Code 会员 Key，必须额外设置 `KIMI_BASE_URL=https://api.kimi.com/coding/v1`，并以 `--model kimi-for-coding` 单独冻结 run。该服务强制 `temperature=1`；代码只对两个 `kimi-for-coding` 稳定别名应用该兼容值，Open Platform 模型仍使用提取 `0`、综合 `0.2`。
+
 ```bash
 export KIMI_API_KEY='Kimi 开放平台 Key'
 python3 -m wechat_cs run-sales-profile-pilot \

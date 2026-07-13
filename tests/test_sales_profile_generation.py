@@ -10,6 +10,7 @@ from unittest.mock import patch
 from wechat_cs.kimi_client import KimiSchemaError
 from wechat_cs.sales_profile_generation import (
     _load_deterministic_facts,
+    _stage_temperature,
     run_sales_profile_pilot,
     validate_extracted_events,
 )
@@ -81,6 +82,12 @@ class FakeKimiClient:
 
 
 class EventValidationTests(unittest.TestCase):
+    def test_kimi_code_alias_uses_required_temperature_without_changing_open_platform(self) -> None:
+        self.assertEqual(_stage_temperature("kimi-for-coding", synthesis=False), 1.0)
+        self.assertEqual(_stage_temperature("kimi-for-coding", synthesis=True), 1.0)
+        self.assertEqual(_stage_temperature("kimi-k2.7-code", synthesis=False), 0.0)
+        self.assertEqual(_stage_temperature("kimi-k2.7-code", synthesis=True), 0.2)
+
     def test_fabricated_quote_order_id_and_numeric_value_are_rejected_per_event(self) -> None:
         customer = "customer_" + "1" * 24
         messages = [raw_message(customer, "message-real", "过几天我再来看看蓝色外套")]
