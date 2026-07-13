@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "sources": [
+    {
+      "id": "service-policy",
+      "type": "lark_doc_or_wiki",
+      "title": "售后、退款与补发政策",
+      "url": "",
+      "enabled": false,
+      "max_age_seconds": 86400,
+      "cache_file": ".wechat-cs/knowledge/service-policy.json"
+    },
+    {
+      "id": "product-facts",
+      "type": "lark_base",
+      "title": "价格与库存",
+      "url": "",
+      "enabled": false,
+      "max_age_seconds": 900,
+      "cache_file": ".wechat-cs/knowledge/product-facts.json"
+    }
+  ]
+}

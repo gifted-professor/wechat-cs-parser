@@ -1,0 +1,13 @@
+{
+  "schema_version": "1",
+  "status": "stopped",
+  "last_success_at": "2026-07-13T12:00:00+08:00",
+  "event_count": 6,
+  "accounts": {
+    "aolai4": {
+      "initialized": true,
+      "last_poll_at": "2026-07-13T12:00:00+08:00",
+      "last_error": ""
+    }
+  }
+}

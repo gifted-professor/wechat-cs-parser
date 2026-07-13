@@ -1,0 +1,9 @@
+﻿账号,客户手机号,客户名称,微信原始ID,微信号/alias,绑定置信度,匹配依据
+fixture-a,13800138000,虚构客户甲,customer-raw-a,fixture_alias_a,0.95,账号加原始ID精确匹配
+fixture-b,13800138000,虚构客户乙,customer-raw-b,fixture_alias_b,0.95,账号加原始ID精确匹配
+fixture-a,13900139000,虚构冲突甲,raw-conflict,fixture_conflict,0.95,账号加原始ID精确匹配
+fixture-a,13700137000,虚构冲突甲,raw-conflict,fixture_conflict,0.95,账号加原始ID精确匹配
+fixture-a,13600136000,只有昵称,,nickname-only,0.95,只有昵称
+unknown-account,13500135000,未知账号,raw-unknown,unknown_alias,0.95,未知账号
+fixture-a,not-a-phone,非法号码,raw-invalid,invalid_alias,0.95,非法号码
+fixture-a,13400134000,低置信客户,raw-review,review_alias,0.82,低置信候选

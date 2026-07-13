@@ -1,0 +1,20 @@
+.DS_Store
+.env
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.wechat-cs/
+*.sqlite3
+
+# The workspace contains a private WeChat export. Never commit it.
+/conversations/
+/contacts.json
+/contacts.jsonl
+/conversation_index.json
+/manifest.json
+/messages.jsonl
+/messages_summary.csv
+/sessions.json
+/sessions.jsonl
+/summary.json

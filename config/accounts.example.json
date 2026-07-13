@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "accounts": {
+    "example-profile-a": {
+      "canonical_account_id": "wechat-account-example-a-v1",
+      "self_sender": "wxid_example_studio_a",
+      "binding_account_alias": "example-binding-a",
+      "state": "review"
+    },
+    "example-profile-b": {
+      "canonical_account_id": "wechat-account-example-b-v1",
+      "self_sender": "wxid_example_studio_b",
+      "binding_account_alias": "example-binding-b",
+      "state": "review"
+    }
+  }
+}

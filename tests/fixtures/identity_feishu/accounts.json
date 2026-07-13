@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "accounts": {
+    "aolai4": {
+      "canonical_account_id": "wechat-account-fixture-aolai4-v1",
+      "self_sender": "studio-sender-aolai4",
+      "binding_account_alias": "",
+      "state": "approved"
+    }
+  }
+}

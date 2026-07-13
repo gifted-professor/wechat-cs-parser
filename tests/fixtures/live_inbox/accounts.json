@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "accounts": {
+    "profile-a": {
+      "canonical_account_id": "wechat-account-fixture-a-v1",
+      "self_sender": "studio-sender-a",
+      "binding_account_alias": "fixture-a",
+      "state": "approved"
+    },
+    "profile-b": {
+      "canonical_account_id": "wechat-account-fixture-b-v1",
+      "self_sender": "studio-sender-b",
+      "binding_account_alias": "fixture-b",
+      "state": "approved"
+    },
+    "profile-c": {
+      "canonical_account_id": "wechat-account-fixture-c-v1",
+      "self_sender": "studio-sender-c",
+      "binding_account_alias": "",
+      "state": "review"
+    },
+    "profile-d": {
+      "canonical_account_id": "wechat-account-fixture-d-v1",
+      "self_sender": "studio-sender-d",
+      "binding_account_alias": "fixture-d",
+      "state": "approved"
+    }
+  }
+}

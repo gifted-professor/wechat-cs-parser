@@ -1,0 +1,3 @@
+{"conversation_id":"11111111111111111111111111111111","conversation_type":"friend","message_id":1,"timestamp":"2026-07-01T10:00:00","message_type":"text","render_type":"text","text":"虚构共享测试号码13800138000。","raw_payload":{"status":3}}
+{"conversation_id":"22222222222222222222222222222222","conversation_type":"friend","message_id":2,"timestamp":"2026-07-01T10:01:00","message_type":"text","render_type":"text","text":"另一个虚构会话也使用13800138000。","raw_payload":{"status":3}}
+{"conversation_id":"33333333333333333333333333333333","conversation_type":"friend","message_id":3,"timestamp":"2026-07-01T10:02:00","message_type":"text","render_type":"text","text":"虚构唯一测试号码13900139000。","raw_payload":{"status":3}}

@@ -1,0 +1,26 @@
+[
+  {
+    "conversation_id": "11111111111111111111111111111111",
+    "conversation_type": "friend",
+    "display_name": "虚构绑定甲",
+    "remark": "",
+    "nick_name": "虚构绑定甲",
+    "file": "conversations/11111111111111111111111111111111.jsonl"
+  },
+  {
+    "conversation_id": "22222222222222222222222222222222",
+    "conversation_type": "friend",
+    "display_name": "虚构绑定乙",
+    "remark": "",
+    "nick_name": "虚构绑定乙",
+    "file": "conversations/22222222222222222222222222222222.jsonl"
+  },
+  {
+    "conversation_id": "33333333333333333333333333333333",
+    "conversation_type": "friend",
+    "display_name": "虚构绑定丙",
+    "remark": "",
+    "nick_name": "虚构绑定丙",
+    "file": "conversations/33333333333333333333333333333333.jsonl"
+  }
+]

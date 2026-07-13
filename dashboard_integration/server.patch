@@ -1,0 +1,19 @@
+--- server.js	2026-07-10
++++ server.js	2026-07-10
+@@ -3,6 +3,7 @@
+ const path = require('path');
+ const { execFileSync } = require('child_process');
+ const zlib = require('zlib');
++const { handleWechatCsProxy } = require('./wechat_cs_proxy');
+ 
+ loadEnvFile(path.join(__dirname, '.env'));
+ 
+@@ -2010,6 +2011,8 @@
+ }
+ 
+ async function handleApiRequest(req, res, requestUrl, urlPath) {
++  if (await handleWechatCsProxy(req, res, requestUrl, urlPath)) return true;
++
+   if (urlPath === '/api/ai/dewu/config') {
+     if (req.method !== 'GET') {
+       sendText(res, 405, 'Method not allowed', { Allow: 'GET' });

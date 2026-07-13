@@ -1,0 +1,241 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta name="description" content="本地微信私聊客户分析与回复起草工作台">
+  <title>私聊工作台</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">私</span>
+        <div>
+          <strong>私聊工作台</strong>
+          <small>本地分析 · 人工确认</small>
+        </div>
+      </div>
+
+      <nav class="main-nav" aria-label="主导航">
+        <button class="nav-item active" data-view="opportunities">
+          <span aria-hidden="true">↗</span><span>客户机会</span>
+        </button>
+        <button class="nav-item" data-view="aftersales">
+          <span aria-hidden="true">!</span><span>售后待办</span>
+          <em id="navAftersalesCount">—</em>
+        </button>
+        <button class="nav-item" data-view="customer">
+          <span aria-hidden="true">✦</span><span>客户详情</span>
+        </button>
+        <button class="nav-item" data-view="draft">
+          <span aria-hidden="true">✎</span><span>手动起草</span>
+        </button>
+        <button class="nav-item" data-view="samples">
+          <span aria-hidden="true">✓</span><span>样本审核</span>
+          <em id="navPendingCount">—</em>
+        </button>
+        <button class="nav-item" data-view="system">
+          <span aria-hidden="true">◌</span><span>系统状态</span>
+        </button>
+      </nav>
+
+      <div class="safety-note">
+        <span class="status-dot"></span>
+        <div><strong>仅建议模式</strong><small>不会控制或发送微信</small></div>
+      </div>
+    </aside>
+
+    <main class="main-content">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow" id="pageEyebrow">今日优先</p>
+          <h1 id="pageTitle">客户机会</h1>
+        </div>
+        <div class="snapshot-pill" id="snapshotPill"><span></span><b>正在读取本机数据</b></div>
+      </header>
+
+      <div id="globalNotice" class="notice hidden" role="status"></div>
+
+      <section class="view active" id="view-opportunities" aria-labelledby="pageTitle">
+        <div class="stat-grid" id="opportunityStats">
+          <article class="stat-card accent"><small>高机会</small><strong>—</strong><span>等待本地分析</span></article>
+          <article class="stat-card"><small>中机会</small><strong>—</strong><span>等待本地分析</span></article>
+          <article class="stat-card"><small>当前客户</small><strong>—</strong><span>严格私聊文本</span></article>
+        </div>
+
+        <div class="panel">
+          <div class="panel-header">
+            <div><h2>建议优先跟进</h2><p>分数来自透明规则，点击客户查看原因和原文证据。</p></div>
+            <div class="segmented" aria-label="机会等级筛选">
+              <button class="active" data-level="">全部</button>
+              <button data-level="high">高</button>
+              <button data-level="medium">中</button>
+              <button data-level="low">低</button>
+            </div>
+          </div>
+          <div id="opportunityList" class="customer-list loading-block">正在读取…</div>
+        </div>
+      </section>
+
+      <section class="view" id="view-aftersales" aria-labelledby="pageTitle">
+        <div class="panel">
+          <div class="panel-header">
+            <div><h2>未解决售后</h2><p>P0 为退款或投诉，P1 为质量、错发或物流异常，P2 为普通查询。</p></div>
+          </div>
+          <div id="aftersalesList" class="customer-list loading-block">正在读取…</div>
+        </div>
+      </section>
+
+      <section class="view" id="view-customer" aria-labelledby="pageTitle">
+        <div id="customerEmpty" class="empty-state">
+          <div class="empty-icon">↗</div>
+          <h2>先从机会或售后列表选择客户</h2>
+          <p>这里会展示最近私聊、判断依据和手动回复起草。</p>
+          <button class="primary-button" data-go-view="opportunities">查看客户机会</button>
+        </div>
+
+          <div id="customerWorkspace" class="customer-workspace hidden">
+          <div class="customer-summary panel">
+            <div class="identity-line">
+              <div class="avatar" id="customerAvatar">客</div>
+              <div><p class="eyebrow">匿名客户</p><h2 id="customerName">—</h2><p id="customerLastActive">—</p></div>
+              <div id="customerScore" class="score-ring">—</div>
+            </div>
+            <p class="summary-copy" id="customerSummary"></p>
+            <div id="customerReasons" class="reason-list"></div>
+            <div id="identityReview" class="identity-review hidden"></div>
+            <div class="inline-actions customer-actions">
+              <button type="button" class="primary-button" id="openDraftView">为该客户起草回复</button>
+            </div>
+          </div>
+
+          <article class="panel conversation-panel">
+            <div class="panel-header compact"><div><h2>最近私聊</h2><p>只显示严格的一对一文字消息。</p></div></div>
+            <div id="conversationTimeline" class="conversation-timeline"></div>
+          </article>
+        </div>
+      </section>
+
+      <section class="view" id="view-draft" aria-labelledby="pageTitle">
+        <div id="draftEmpty" class="empty-state">
+          <div class="empty-icon">✎</div>
+          <h2>先选择需要回复的客户</h2>
+          <p>从机会、售后或客户详情中选择客户后，再粘贴最新消息。</p>
+          <button class="primary-button" data-go-view="opportunities">查看客户机会</button>
+        </div>
+        <article id="draftWorkspace" class="panel draft-panel hidden">
+          <div class="panel-header compact">
+            <div><p class="eyebrow">当前客户</p><h2 id="draftCustomerName">手动起草</h2><p>粘贴最新客户消息，AI 只生成待审核建议。</p></div>
+            <span class="human-badge">人工发送</span>
+          </div>
+          <form id="draftForm">
+            <label for="latestMessage">客户最新消息</label>
+            <textarea id="latestMessage" rows="5" maxlength="8000" placeholder="把客户刚发来的文字粘贴到这里…" required></textarea>
+            <button class="primary-button wide" id="generateDraft" type="submit">生成回复建议</button>
+          </form>
+          <div id="draftResult" class="draft-result hidden">
+            <div class="draft-result-head"><strong>回复建议</strong><span id="draftIntent"></span></div>
+            <textarea id="draftText" rows="7" maxlength="12000" aria-label="回复建议，可在反馈前修改"></textarea>
+            <div id="draftWarnings" class="warning-list"></div>
+            <div class="draft-actions">
+              <button type="button" class="secondary-button" id="copyDraft">复制</button>
+              <button type="button" class="success-button" data-feedback="adopted">直接采用</button>
+              <button type="button" class="secondary-button" data-feedback="edited">修改后采用</button>
+              <button type="button" class="ghost-danger" data-feedback="rejected">放弃</button>
+            </div>
+            <p class="feedback-status" id="feedbackStatus"></p>
+          </div>
+        </article>
+      </section>
+
+      <section class="view" id="view-samples" aria-labelledby="pageTitle">
+        <div class="panel calibration-panel">
+          <div class="panel-header">
+            <div><h2>先校准消息角色</h2><p>确认这条消息是客户发的，还是工作室发的。系统不会显示预设答案。</p></div>
+            <strong id="calibrationProgress">0 / 200</strong>
+          </div>
+          <div class="progress-track"><span id="calibrationProgressBar"></span></div>
+          <div id="calibrationCard" class="calibration-card loading-block">正在读取校准样本…</div>
+        </div>
+        <div class="panel">
+          <div class="panel-header">
+            <div><h2>风格样本审核</h2><p>只有通过审核的匿名问答，才会用于模仿工作室表达方式。</p></div>
+            <div class="segmented" aria-label="样本状态筛选">
+              <button class="active" data-sample-status="pending">待审核</button>
+              <button data-sample-status="approved">已通过</button>
+              <button data-sample-status="rejected">已拒绝</button>
+            </div>
+          </div>
+          <div id="sampleList" class="sample-list loading-block">正在读取…</div>
+        </div>
+      </section>
+
+      <section class="view" id="view-system" aria-labelledby="pageTitle">
+        <div class="system-grid">
+          <article class="panel status-card">
+            <p class="eyebrow">本地数据</p>
+            <h2 id="systemDataStatus">检查中</h2>
+            <dl id="healthDetails"></dl>
+          </article>
+          <article class="panel status-card">
+            <p class="eyebrow">访问保护</p>
+            <h2>服务令牌</h2>
+            <p>在远程 Dashboard 使用时填入 Bearer Token。令牌只保存在当前标签页。</p>
+            <form id="tokenForm" class="token-form">
+              <label for="apiToken">访问令牌</label>
+              <input type="password" id="apiToken" autocomplete="off" placeholder="本机访问可留空">
+              <div class="inline-actions">
+                <button class="primary-button" type="submit">保存并重试</button>
+                <button class="secondary-button" type="button" id="clearToken">清除</button>
+              </div>
+            </form>
+          </article>
+          <article class="panel status-card safety-card">
+            <p class="eyebrow">安全边界</p>
+            <h2>不会做的事</h2>
+            <ul>
+              <li>不会自动操作或发送微信</li>
+              <li>不会返回原始微信 ID 或手机号</li>
+              <li>不会把 Kimi Key 放进浏览器</li>
+              <li>没有事实依据时不会编造承诺</li>
+            </ul>
+          </article>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <template id="customerRowTemplate">
+    <button class="customer-row" type="button">
+      <span class="avatar small">客</span>
+      <span class="customer-row-main"><strong></strong><small class="summary"></small><small class="timestamp"></small></span>
+      <span class="priority-badge"></span>
+      <span class="customer-score"><b></b><small>机会分</small></span>
+      <span class="chevron" aria-hidden="true">›</span>
+    </button>
+  </template>
+
+  <template id="sampleTemplate">
+    <article class="sample-card">
+      <div class="sample-meta"><span class="stage-badge"></span><span class="split-badge"></span><time></time></div>
+      <div class="sample-dialogue">
+        <div><span>客户</span><p class="trigger"></p></div>
+        <div class="studio"><span>工作室</span><p class="reply"></p></div>
+      </div>
+      <div class="risk-tags"></div>
+      <label>审核备注（选填）<input class="review-note" maxlength="240" placeholder="例如：包含旧事实、缺少上下文"></label>
+      <div class="sample-actions">
+        <button class="success-button" data-review="approved">通过</button>
+        <button class="ghost-danger" data-review="rejected">拒绝</button>
+        <button class="secondary-button" data-review="pending">待定</button>
+      </div>
+    </article>
+  </template>
+
+  <script src="app.js" defer></script>
+</body>
+</html>

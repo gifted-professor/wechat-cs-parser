@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wechat-cs-parser"
+version = "0.1.0"
+description = "Local-first private-chat parser and human-reviewed customer-service workbench"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = []
+
+[project.scripts]
+wechat-cs = "wechat_cs.__main__:main"
+wechat-cs-api = "wechat_cs.api:main"
+
+[tool.setuptools.packages.find]
+include = ["wechat_cs*", "dashboard_integration*"]
+
+[tool.setuptools.package-data]
+wechat_cs = ["static/*.html", "static/*.js", "static/*.css", "static/*.svg"]

@@ -1,0 +1,50 @@
+[
+  {
+    "conversation_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "conversation_username": "synthetic_friend_alpha",
+    "display_name": "虚构客户甲",
+    "remark": "",
+    "nick_name": "虚构客户甲",
+    "alias": "",
+    "conversation_type": "friend",
+    "notification_muted": false,
+    "notification_state": "normal",
+    "chat_room_notify": 0,
+    "last_active_at": "2026-07-01T10:40:00",
+    "message_count": 9,
+    "file": "conversations/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.jsonl",
+    "file_label": "synthetic-alpha"
+  },
+  {
+    "conversation_id": "cccccccccccccccccccccccccccccccc",
+    "conversation_username": "synthetic_friend_beta",
+    "display_name": "虚构客户乙",
+    "remark": "",
+    "nick_name": "虚构客户乙",
+    "alias": "",
+    "conversation_type": "friend",
+    "notification_muted": false,
+    "notification_state": "normal",
+    "chat_room_notify": 0,
+    "last_active_at": "2026-07-02T09:10:00",
+    "message_count": 2,
+    "file": "conversations/cccccccccccccccccccccccccccccccc.jsonl",
+    "file_label": "synthetic-beta"
+  },
+  {
+    "conversation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "conversation_username": "synthetic_group@chatroom",
+    "display_name": "虚构群聊",
+    "remark": "",
+    "nick_name": "虚构群聊",
+    "alias": "",
+    "conversation_type": "group",
+    "notification_muted": false,
+    "notification_state": "normal",
+    "chat_room_notify": 0,
+    "last_active_at": "2026-07-01T10:20:00",
+    "message_count": 1,
+    "file": "conversations/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.jsonl",
+    "file_label": "synthetic-group"
+  }
+]

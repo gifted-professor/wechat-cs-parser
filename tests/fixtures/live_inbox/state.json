@@ -1,0 +1,28 @@
+{
+  "schema_version": "1",
+  "status": "stopped",
+  "last_success_at": "2026-07-13T12:00:00+08:00",
+  "event_count": 12,
+  "accounts": {
+    "profile-a": {
+      "initialized": true,
+      "last_poll_at": "2026-07-13T12:00:00+08:00",
+      "last_error": ""
+    },
+    "profile-b": {
+      "initialized": true,
+      "last_poll_at": "2026-07-13T12:00:00+08:00",
+      "last_error": ""
+    },
+    "profile-c": {
+      "initialized": true,
+      "last_poll_at": "2026-07-13T12:00:00+08:00",
+      "last_error": ""
+    },
+    "profile-d": {
+      "initialized": false,
+      "last_poll_at": "2026-07-13T12:00:00+08:00",
+      "last_error": "fixture-not-initialized"
+    }
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "synced_at": "2026-07-13T12:00:00+08:00",
+  "total_records": 11,
+  "primary_records": 11,
+  "extra_sources": [],
+  "records": [
+    {"record_id":"order-normal","phone":"13800138000","tracking_no":"YT1111111111","pay_date":"2026-07-01 10:00:00","revenue":199,"platform":"虚构平台","refund_type":"","refund_reason":"","refund_amount":null,"refund_date":null,"return_status":""},
+    {"record_id":"order-supplier-only","phone":"13600136000","tracking_no":"YT2222222222","pay_date":"","revenue":null,"pay_amount":299,"is_paid":true,"platform":"虚构平台"},
+    {"record_id":"order-cancel","phone":"13700137000","tracking_no":"YT3333333333","pay_date":"2026-07-02 10:00:00","revenue":100,"refund_type":"取消","refund_reason":"客户取消","refund_amount":100,"refund_date":"2026-07-03 10:00:00","return_status":"close"},
+    {"record_id":"order-full-return","customer_name":"张三","phone":"13900139000","tracking_no":"YT4444444444","pay_date":"2026-07-03 10:00:00","revenue":100,"refund_type":"退","refund_reason":"联系人张三申请退货","refund_amount":100,"refund_date":"2026-07-04 10:00:00","return_status":"close"},
+    {"record_id":"order-partial-return","phone":"13500135000","tracking_no":"YT5555555555","pay_date":"2026-07-04 10:00:00","revenue":100,"refund_type":"退","refund_reason":"部分退款","refund_amount":40,"refund_date":"2026-07-05 10:00:00","return_status":"close"},
+    {"record_id":"order-return-taro","phone":"13400134000","tracking_no":"YT6666666666","pay_date":"2026-07-05 10:00:00","revenue":88,"refund_type":"退芋圆","refund_reason":"退回芋圆","refund_amount":88,"refund_date":"2026-07-06 10:00:00","return_status":"退回芋圆"},
+    {"record_id":"order-exchange","phone":"13300133000","tracking_no":"YT7777777777","pay_date":"2026-07-06 10:00:00","revenue":168,"refund_type":"换","refund_reason":"换尺码","refund_amount":null,"refund_date":null,"return_status":"close"},
+    {"record_id":"order-compensation","phone":"13200132000","tracking_no":"YT8888888888","pay_date":"2026-07-07 10:00:00","revenue":168,"refund_type":"补","refund_reason":"补发配件","refund_amount":null,"refund_date":null,"return_status":"close"},
+    {"record_id":"order-other","phone":"13100131000","tracking_no":"YT9999999999","pay_date":"2026-07-08 10:00:00","revenue":168,"refund_type":"其他","refund_reason":"虚构异常","refund_amount":null,"refund_date":null,"return_status":"待处理"},
+    {"record_id":"order-duplicate-tracking","phone":"13000130000","tracking_no":"YT1111111111","pay_date":"2026-07-09 10:00:00","revenue":128,"refund_type":"","refund_reason":"","refund_amount":null,"refund_date":null,"return_status":""},
+    {"record_id":"order-anomaly","phone":"18900189000","tracking_no":"YT0000000000","pay_date":"1970-01-01 00:00:00","revenue":50,"refund_type":"退","refund_reason":"异常测试","refund_amount":500,"refund_date":"2026-07-20 10:00:00","return_status":"处理中"}
+  ]
+}

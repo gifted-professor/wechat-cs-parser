@@ -1,0 +1,9 @@
+{
+  "synced_at": "2026-07-13T12:00:00+08:00",
+  "total_records": 3,
+  "records": [
+    {"record_id":"full-1","phone":"13800138000","tracking_no":"YT9876543210"},
+    {"record_id":"full-2","phone":"13900139000","tracking_no":"JD1234567890"},
+    {"record_id":"full-3","phone":"13700137000","tracking_no":"ZT1234567890"}
+  ]
+}
