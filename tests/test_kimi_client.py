@@ -118,6 +118,20 @@ class KimiJsonClientTests(unittest.TestCase):
         self.assertEqual(request.full_url, "https://env.invalid/v1/chat/completions")
         self.assertEqual(request.get_header("Authorization"), "Bearer environment-key")
 
+    def test_timeout_is_capped_at_five_minutes(self) -> None:
+        opener = SequenceOpener(FakeResponse(kimi_response('{"ok": true}')))
+        client = KimiJsonClient(
+            api_key="synthetic-key",
+            opener=opener,
+            sleeper=lambda _: None,
+        )
+
+        result = client.complete_json([], "kimi-for-coding", 1, 900)
+
+        self.assertEqual(result, {"ok": True})
+        _, timeout = opener.calls[0]
+        self.assertEqual(timeout, 300.0)
+
     def test_missing_api_key_is_credential_error_before_any_request(self) -> None:
         opener = SequenceOpener(FakeResponse(kimi_response('{"unused": true}')))
         with mock.patch.dict(os.environ, {"KIMI_API_KEY": ""}):

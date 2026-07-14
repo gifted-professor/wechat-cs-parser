@@ -12,6 +12,7 @@ from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
 DEFAULT_KIMI_BASE_URL = "https://api.moonshot.cn/v1"
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 MAX_ATTEMPTS = 3
+MAX_TIMEOUT_SECONDS = 300.0
 
 JsonValidator = Callable[[Dict[str, Any]], Any]
 
@@ -92,7 +93,7 @@ class KimiJsonClient:
             raise KimiSchemaError("Kimi request settings are invalid") from exc
         if timeout <= 0:
             raise KimiSchemaError("Kimi timeout must be positive")
-        timeout = min(timeout, 120.0)
+        timeout = min(timeout, MAX_TIMEOUT_SECONDS)
 
         request_payload = {
             "model": str(model),

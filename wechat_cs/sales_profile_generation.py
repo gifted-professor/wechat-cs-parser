@@ -592,7 +592,7 @@ def _generate_one(subject: _SubjectInput, client: KimiJsonClient) -> _GeneratedS
                 _extract_prompt(chunk, subject.deterministic_facts),
                 subject.model,
                 _stage_temperature(subject.model, synthesis=False),
-                120,
+                300,
             )
             events.extend(
                 validate_extracted_events(
@@ -608,7 +608,7 @@ def _generate_one(subject: _SubjectInput, client: KimiJsonClient) -> _GeneratedS
             _profile_prompt(subject.deterministic_facts, accepted),
             subject.model,
             _stage_temperature(subject.model, synthesis=True),
-            120,
+            300,
         )
         card = _validate_card(
             card_payload,
