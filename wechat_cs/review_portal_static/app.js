@@ -312,6 +312,9 @@ async function saveReview(event) {
   if (verdict === 'edited' && !Object.keys(corrections).length) {
     $('#saveStatus').textContent = '选择“改完可以用”时，请填写具体修改建议'; return;
   }
+  if (verdict === 'rejected' && !$('#reviewNotes').value.trim()) {
+    $('#saveStatus').textContent = '选择“不建议使用”时，请写明具体原因'; return;
+  }
   const button = $('#saveReview');
   button.disabled = true;
   $('#saveStatus').textContent = '正在保存…';

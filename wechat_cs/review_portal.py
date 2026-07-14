@@ -218,6 +218,8 @@ def _validate_review(body: Any) -> Dict[str, Any]:
         raise PortalError(HTTPStatus.BAD_REQUEST, "invalid_corrections", "修改建议格式错误")
     if verdict == "edited" and not corrections:
         raise PortalError(HTTPStatus.BAD_REQUEST, "missing_corrections", "修改后通过时请填写修改建议")
+    if verdict == "rejected" and not notes:
+        raise PortalError(HTTPStatus.BAD_REQUEST, "missing_rejection_reason", "不建议使用时请填写具体原因")
     score_names = {
         "fact_accuracy",
         "insight_usefulness",

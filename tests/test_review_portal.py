@@ -179,6 +179,18 @@ class ReviewPortalTests(unittest.TestCase):
             conn.close()
         self.assertEqual(count, 1)
 
+    def test_edited_and_rejected_reviews_require_actionable_comments(self) -> None:
+        status, edited = self.request(
+            "POST", "/api/profiles/sales-profile-1/review",
+            self.valid_review(verdict="edited", corrections={}, notes=""),
+        )
+        self.assertEqual((status, edited["error"]["code"]), (400, "missing_corrections"))
+        status, rejected = self.request(
+            "POST", "/api/profiles/sales-profile-1/review",
+            self.valid_review(verdict="rejected", corrections={}, notes=""),
+        )
+        self.assertEqual((status, rejected["error"]["code"]), (400, "missing_rejection_reason"))
+
     def test_no_model_or_send_route(self) -> None:
         for path in ("/api/profiles/sales-profile-1/send", "/api/run", "/v1/sales-profile-pilot"):
             status, payload = self.request("POST", path, {})
