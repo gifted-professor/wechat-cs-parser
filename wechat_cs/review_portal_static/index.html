@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta name="description" content="Kimi 客户销售画像验收门户">
+  <title>Kimi 销售画像验收</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div id="loginGate" class="login-gate">
+    <form id="loginForm" class="login-card">
+      <div class="brand-mark">K</div>
+      <p class="eyebrow">客户评审入口</p>
+      <h1>Kimi 销售画像验收</h1>
+      <p>输入项目方提供的访问码。页面仅用于查看匿名作战卡和提交评语，没有消息发送能力。</p>
+      <label>访问码<input id="accessCode" type="password" autocomplete="one-time-code" required></label>
+      <button type="submit">进入验收</button>
+      <small id="loginStatus" role="status"></small>
+    </form>
+  </div>
+
+  <div id="portal" class="portal hidden">
+    <header class="masthead">
+      <div class="masthead-copy">
+        <p class="eyebrow">固定历史快照 · 匿名评审</p>
+        <h1>50 人销售作战卡</h1>
+        <p id="runMeta">正在读取批次信息…</p>
+      </div>
+      <div class="assumption"><span>业务前提</span><strong>默认满库存</strong></div>
+    </header>
+
+    <section class="progress-board" aria-label="审核进度">
+      <article><span>已生成</span><strong id="generatedCount">—</strong><small>张完整作战卡</small></article>
+      <article><span>已审核</span><strong id="reviewedCount">—</strong><small id="reviewProgress">等待开始</small></article>
+      <article><span>通过 / 修改 / 拒绝</span><strong id="verdictCounts">—</strong><small>多人评审会分别保存</small></article>
+      <div class="progress-track"><span id="progressBar"></span></div>
+    </section>
+
+    <main class="workspace">
+      <aside class="sample-panel">
+        <div class="sample-toolbar">
+          <label>客户分层
+            <select id="stratumFilter">
+              <option value="">全部</option>
+              <option value="complex_risk">售后关怀</option>
+              <option value="future_return_wait">回访等待</option>
+              <option value="high_frequency">高频客户</option>
+              <option value="high_value">高价值客户</option>
+              <option value="dormant_repeat">沉睡复购</option>
+              <option value="control">普通对照</option>
+            </select>
+          </label>
+          <label>审核状态
+            <select id="statusFilter">
+              <option value="">全部</option>
+              <option value="unreviewed">待审核</option>
+              <option value="reviewed">已审核</option>
+            </select>
+          </label>
+        </div>
+        <div id="sampleList" class="sample-list"><div class="loading">正在读取样本…</div></div>
+      </aside>
+
+      <article class="detail-panel">
+        <div id="detailEmpty" class="detail-empty">
+          <div>50</div><h2>选择左侧样本开始审核</h2><p>先看一分钟结论，再展开完整画像和证据。</p>
+        </div>
+        <div id="detailContent" class="hidden">
+          <header class="detail-header">
+            <div><p class="eyebrow" id="sampleStratum">客户画像</p><h2 id="sampleTitle">匿名样本</h2><p id="sampleMeta">—</p></div>
+            <button id="nextUnreviewed" class="secondary" type="button">下一张待审核</button>
+          </header>
+
+          <section class="quick-view">
+            <div class="section-heading"><span>01</span><div><h3>一分钟结论</h3><p>先判断这张卡有没有销售价值</p></div></div>
+            <div class="quick-grid">
+              <div><span>客户价值</span><div id="customerValue"></div></div>
+              <div><span>联系时机</span><div id="timeRhythm"></div></div>
+              <div class="wide"><span>当前机会</span><div id="currentOpportunity"></div></div>
+              <div class="opening wide"><span>建议开场</span><div id="naturalOpening"></div></div>
+            </div>
+          </section>
+
+          <section class="full-card">
+            <div class="section-heading"><span>02</span><div><h3>完整销售画像</h3><p>偏好、驱动力、承诺和风险</p></div></div>
+            <div class="card-grid">
+              <div><h4>商品偏好</h4><div id="productPreferences"></div></div>
+              <div><h4>购买驱动力</h4><div id="purchaseDrivers"></div></div>
+              <div><h4>历史承诺</h4><div id="historicalCommitments"></div></div>
+              <div><h4>建议联系理由</h4><div id="contactReason"></div></div>
+              <div class="risk"><h4>风险提醒</h4><div id="risks"></div></div>
+              <div class="unknown"><h4>仍需确认</h4><div id="unknowns"></div></div>
+            </div>
+          </section>
+
+          <details class="evidence-panel">
+            <summary><span>03 · 证据与可复算事实</span><b id="evidenceCount">0 条</b></summary>
+            <div id="factSummary" class="fact-summary"></div>
+            <div id="evidenceList" class="evidence-list"></div>
+          </details>
+
+          <section class="review-panel">
+            <div class="section-heading"><span>04</span><div><h3>提交验收意见</h3><p>评语会和评分一起保存，建议把“不对在哪里”写清楚</p></div></div>
+            <form id="reviewForm">
+              <label class="reviewer-field">您的称呼<input id="reviewer" maxlength="120" placeholder="例如：王老师 / 品牌方A" required></label>
+              <div id="scoreFields" class="score-fields"></div>
+              <fieldset class="verdict-field">
+                <legend>总体结论</legend>
+                <label><input type="radio" name="verdict" value="approved" required><span><b>可以直接用</b><small>事实与销售表达都合格</small></span></label>
+                <label><input type="radio" name="verdict" value="edited"><span><b>改完可以用</b><small>方向正确，需要具体修改</small></span></label>
+                <label><input type="radio" name="verdict" value="rejected"><span><b>不建议使用</b><small>事实或销售逻辑存在明显问题</small></span></label>
+              </fieldset>
+              <div class="correction-grid">
+                <label>建议如何修改开场<textarea id="openingCorrection" rows="3" placeholder="可直接写出您认为更好的版本"></textarea></label>
+                <label>事实哪里不准确<textarea id="factCorrection" rows="3" placeholder="指出错误事实或需要补充的证据"></textarea></label>
+              </div>
+              <label>其他评语<textarea id="reviewNotes" rows="4" maxlength="4000" placeholder="例如：洞察有用，但太像客服，不像熟客销售；建议更自然一些。"></textarea></label>
+              <div class="submit-row">
+                <button id="saveReview" type="submit">保存这张验收</button>
+                <span id="saveStatus" role="status"></span>
+              </div>
+            </form>
+            <div id="reviewHistory" class="review-history"></div>
+          </section>
+        </div>
+      </article>
+    </main>
+    <footer>匿名历史样本 · 联系前核对最新状态 · 本页没有发送能力</footer>
+  </div>
+  <script src="/app.js" defer></script>
+</body>
+</html>

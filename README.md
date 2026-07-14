@@ -118,6 +118,20 @@ python3 -m wechat_cs run-sales-profile-pilot \
 
 试点结果只进入“50 人画像验收”，不写回客户记忆，也没有自动发送能力。每张历史画像都必须在联系前核对最新状态。
 
+给外部客户验收时使用独立的匿名评审门户，不要暴露完整工作台。门户仅展示作战卡、确定性事实和已验证证据，支持五项评分、总体结论、修改建议和自由评语；不提供客户检索、模型触发或消息发送能力。访问码至少 20 个字符，只保存在服务端环境变量中：
+
+```bash
+export WECHAT_CS_REVIEW_ACCESS_CODE='至少 20 字符的独立访问码'
+python3 -m wechat_cs.review_portal \
+  --host 127.0.0.1 \
+  --port 8898 \
+  --db /absolute/path/to/run.sqlite3 \
+  --run-id sales-profile-run_固定批次 \
+  --allowed-host your-device.example.ts.net
+```
+
+公网映射只应指向这个回环地址端口。客户在浏览器输入访问码后才能读取数据；访问码只存于当前标签页。页面明确标注“默认满库存”“联系前核对最新状态”，并对手机号、身份证号和内部证据编号做展示层隐藏。
+
 审核页面只使用以下接口：
 
 - `GET /v1/sales-profile-pilot?run_id=latest&status=&stratum=&limit=&offset=`
