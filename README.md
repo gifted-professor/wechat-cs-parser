@@ -118,25 +118,30 @@ python3 -m wechat_cs run-sales-profile-pilot \
 
 试点结果只进入“50 人画像验收”，不写回客户记忆，也没有自动发送能力。每张历史画像都必须在联系前核对最新状态。
 
-给外部客户验收时使用独立的匿名评审门户，不要暴露完整工作台。门户仅展示作战卡、确定性事实和已验证证据，支持五项评分、总体结论、修改建议和自由评语；不提供客户检索、模型触发或消息发送能力。访问码至少 20 个字符，只保存在服务端环境变量中：
+`review_portal` 是内部客服工作台，不是外部匿名评审门户。它会在详情页展示本地解析的客户姓名、完整手机号、历史订单、冻结批次内的去敏文字聊天，以及基于有效订单计算的连带购买样本；当前不设置访问码，因此只能绑定在受控内网或 Tailscale 私网地址，禁止监听公网地址或做公网映射。姓名和手机号只在本地展示边缘从 Dashboard 客户资料解析，不会写回画像或模型产物。工作台保存总体结论、人工建议开场、其他修改意见和可选的优先级反馈，不提供模型触发或消息发送能力：
 
 ```bash
-export WECHAT_CS_REVIEW_ACCESS_CODE='至少 20 字符的独立访问码'
 python3 -m wechat_cs.review_portal \
   --host 127.0.0.1 \
   --port 8898 \
   --db /absolute/path/to/run.sqlite3 \
   --run-id sales-profile-run_固定批次 \
-  --allowed-host your-device.example.ts.net
+  --customer-data /absolute/path/to/customer_action_data.json \
+  --hmac-secret-file /absolute/path/to/hmac_secret \
+  --allowed-host 你的受控内网地址
 ```
 
-公网映射只应指向这个回环地址端口。客户在浏览器输入访问码后才能读取数据；访问码只存于当前标签页。页面明确标注“默认满库存”“联系前核对最新状态”，并对手机号、身份证号和内部证据编号做展示层隐藏。
+同一 Tailscale 私网内、且网络策略允许访问该设备的员工打开地址后即可读取数据。客户列表只显示掩码手机号，进入详情后才显示完整号码。页面明确标注“默认满库存”“联系前核对最新状态”，证据区仍会隐藏手机号、身份证号和内部证据编号。如果需要给外部人员做匿名验收，必须另建不加载客户身份源的独立服务，不能复用这个内部工作台。
 
-审核页面只使用以下接口：
+内部工作台只使用以下接口：
 
-- `GET /v1/sales-profile-pilot?run_id=latest&status=&stratum=&limit=&offset=`
-- `GET /v1/sales-profile-pilot/{sales_profile_id}`
-- `POST /v1/sales-profile-pilot/{sales_profile_id}/review`
+- `GET /api/summary`
+- `GET /api/profiles?promotion=eligible|review|excluded|all&status=&stratum=`
+- `GET /api/profiles/{sales_profile_id}`
+- `GET /api/profiles/{sales_profile_id}/messages?limit=&before=`
+- `POST /api/profiles/{sales_profile_id}/review`
+
+聊天接口只返回冻结批次内的 `message_ref`、角色、时间和去敏文字；审核表只保存被选消息的引用，不复制聊天正文。连带购买建议只统计无取消、无退货且没有未结售后的有效订单，并显示样本人数；人工搭配方向不能冒充数据结论。
 
 ## 5. Plan 7 人工复核
 

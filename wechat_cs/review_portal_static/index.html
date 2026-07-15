@@ -4,44 +4,42 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
-  <meta name="description" content="Kimi 客户销售画像验收门户">
-  <title>Kimi 销售画像验收</title>
+  <meta name="description" content="内部客服销售跟进与开场审核工作台">
+  <title>销售跟进工作台</title>
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
-  <div id="loginGate" class="login-gate">
-    <form id="loginForm" class="login-card">
-      <div class="brand-mark">K</div>
-      <p class="eyebrow">客户评审入口</p>
-      <h1>Kimi 销售画像验收</h1>
-      <p>输入项目方提供的访问码。页面仅用于查看匿名作战卡和提交评语，没有消息发送能力。</p>
-      <label>访问码<input id="accessCode" type="password" autocomplete="one-time-code" required></label>
-      <button type="submit">进入验收</button>
-      <small id="loginStatus" role="status"></small>
-    </form>
-  </div>
-
-  <div id="portal" class="portal hidden">
+  <div id="portal" class="portal">
     <header class="masthead">
       <div class="masthead-copy">
-        <p class="eyebrow">固定历史快照 · 匿名评审</p>
-        <h1>50 人销售作战卡</h1>
-        <p id="runMeta">正在读取批次信息…</p>
+        <p class="eyebrow">客户价值 · 促单排序 · 开场审核</p>
+        <h1>销售跟进工作台</h1>
+        <p id="runMeta">正在读取客户数据… · 仅限 Tailscale 内网使用</p>
       </div>
-      <div class="assumption"><span>业务前提</span><strong>默认满库存</strong></div>
+      <div class="assumption"><span>当前业务口径</span><strong>默认满库存</strong></div>
     </header>
 
-    <section class="progress-board" aria-label="审核进度">
-      <article><span>已生成</span><strong id="generatedCount">—</strong><small>张完整作战卡</small></article>
-      <article><span>已审核</span><strong id="reviewedCount">—</strong><small id="reviewProgress">等待开始</small></article>
-      <article><span>通过 / 修改 / 拒绝</span><strong id="verdictCounts">—</strong><small>多人评审会分别保存</small></article>
+    <section class="progress-board" aria-label="工作台概览">
+      <article><span>画像已准备</span><strong id="generatedCount">—</strong><small>位客户</small></article>
+      <article><span>可进入促销</span><strong id="eligibleCount">—</strong><small>已通过风险门槛</small></article>
+      <article><span>售后待确认</span><strong id="reviewCount">—</strong><small>核清前不进入促销</small></article>
+      <article><span>仅服务不促销</span><strong id="excludedCount">—</strong><small>高售后或拒绝联系</small></article>
+      <article><span>开场已验收</span><strong id="reviewedCount">—</strong><small id="reviewProgress">等待开始</small></article>
       <div class="progress-track"><span id="progressBar"></span></div>
     </section>
 
     <main class="workspace">
       <aside class="sample-panel">
         <div class="sample-toolbar">
-          <label>客户分层
+          <label>促销状态
+            <select id="promotionFilter">
+              <option value="eligible">可促销客户</option>
+              <option value="review">售后待确认</option>
+              <option value="excluded">仅服务、不促销</option>
+              <option value="all">全部客户</option>
+            </select>
+          </label>
+          <label>客户类型
             <select id="stratumFilter">
               <option value="">全部</option>
               <option value="complex_risk">售后关怀</option>
@@ -52,39 +50,187 @@
               <option value="control">普通对照</option>
             </select>
           </label>
-          <label>审核状态
+          <label>验收状态
             <select id="statusFilter">
               <option value="">全部</option>
-              <option value="unreviewed">待审核</option>
-              <option value="reviewed">已审核</option>
+              <option value="unreviewed">待验收</option>
+              <option value="reviewed">已验收</option>
             </select>
           </label>
         </div>
-        <div id="sampleList" class="sample-list"><div class="loading">正在读取样本…</div></div>
+        <div class="list-caption"><span>按促单优先分从高到低</span><b id="listCount">—</b></div>
+        <div id="sampleList" class="sample-list"><div class="loading">正在读取客户…</div></div>
       </aside>
 
       <article class="detail-panel">
         <div id="detailEmpty" class="detail-empty">
-          <div>50</div><h2>选择左侧样本开始审核</h2><p>先看一分钟结论，再展开完整画像和证据。</p>
+          <div>客</div><h2>选择左侧客户开始判断</h2><p>先看客户价值和当前机会，再核对订单与建议开场。</p>
         </div>
         <div id="detailContent" class="hidden">
           <header class="detail-header">
-            <div><p class="eyebrow" id="sampleStratum">客户画像</p><h2 id="sampleTitle">匿名样本</h2><p id="sampleMeta">—</p></div>
-            <button id="nextUnreviewed" class="secondary" type="button">下一张待审核</button>
+            <div>
+              <p class="eyebrow" id="sampleStratum">客户画像</p>
+              <h2 id="sampleTitle">客户</h2>
+              <p id="sampleMeta">—</p>
+            </div>
+            <div class="header-actions">
+              <span id="headerPriority" class="priority-pill">—</span>
+              <button id="nextUnreviewed" class="secondary" type="button">下一位待验收</button>
+            </div>
           </header>
 
-          <section class="quick-view">
-            <div class="section-heading"><span>01</span><div><h3>一分钟结论</h3><p>先判断这张卡有没有销售价值</p></div></div>
-            <div class="quick-grid">
-              <div><span>客户价值</span><div id="customerValue"></div></div>
-              <div><span>联系时机</span><div id="timeRhythm"></div></div>
-              <div class="wide"><span>当前机会</span><div id="currentOpportunity"></div></div>
-              <div class="opening wide"><span>建议开场</span><div id="naturalOpening"></div></div>
+          <section class="customer-value-section">
+            <div class="section-heading"><span>01</span><div><h3>客户价值</h3><p>先确认这个人是谁、值不值得跟</p></div></div>
+            <div id="promotionBanner" class="promotion-banner hidden"></div>
+            <div class="value-hero">
+              <div class="identity-card">
+                <p class="identity-kicker">客户档案</p>
+                <h3 id="customerName">—</h3>
+                <dl>
+                  <div><dt>手机号</dt><dd id="customerPhone">—</dd></div>
+                  <div><dt>会员归属店铺</dt><dd id="memberShop">—</dd></div>
+                  <div><dt>最近成交渠道</dt><dd id="lastOrderChannel">—</dd></div>
+                </dl>
+              </div>
+              <div class="priority-card">
+                <span>促单优先分</span>
+                <strong id="priorityScore">—</strong>
+                <b id="priorityLabel">—</b>
+                <p id="scoreFactors">—</p>
+              </div>
+              <div class="value-metrics">
+                <article><span>客单均额</span><strong id="averageOrder">—</strong><small>按有效付款记录计算</small></article>
+                <article><span>有效付款记录</span><strong id="orderCount">—</strong><small id="repeatCount">—</small></article>
+                <article><span>累计消费</span><strong id="totalSpend">—</strong><small id="lastOrderDate">—</small></article>
+                <article><span>售后表现</span><strong id="aftersalesSummary">—</strong><small id="cancelledCount">—</small></article>
+              </div>
+              <div class="habit-strip">
+                <article><span>更容易回复微信</span><strong id="contactHabit">—</strong></article>
+                <article><span>通常何时下单</span><strong id="orderHabit">—</strong></article>
+                <article><span>历史复购周期</span><strong id="repurchaseCycle">—</strong></article>
+              </div>
             </div>
           </section>
 
+          <section class="decision-section">
+            <div class="section-heading"><span>02</span><div><h3>今天怎么跟</h3><p>看清依据，再留下你真正会发给客户的话</p></div></div>
+            <div class="decision-flow">
+              <div class="flow-stage">
+                <div class="flow-stage-heading"><span>第一步</span><div><h4>先看系统给出的机会和开场</h4><p>这是辅助判断，不会自动发给客户</p></div></div>
+                <div class="decision-grid">
+                  <article class="opportunity-card">
+                    <span>当前机会</span>
+                    <div id="currentOpportunity"></div>
+                  </article>
+                  <article class="opening-card">
+                    <div class="opening-head"><span>建议开场</span><button id="editOpening" type="button">我来写一版</button></div>
+                    <div id="naturalOpening"></div>
+                    <div id="openingCaution" class="opening-caution hidden"></div>
+                    <div id="openingEditor" class="opening-editor hidden">
+                      <label>如果现在由你来促单，你会怎么发？
+                        <textarea id="suggestedOpening" form="reviewForm" rows="5" maxlength="2000" placeholder="请写一条可以直接发给客户的完整消息，包括自然称呼、联系理由和下一步引导"></textarea>
+                      </label>
+                      <small>请写完整可发送的版本，不要复制原文，也不要填写客户真实姓名或手机号。</small>
+                    </div>
+                  </article>
+                </div>
+                <article id="crossSellCard" class="cross-sell-card hidden">
+                  <div class="cross-sell-heading">
+                    <div><span>真实订单里的连带购买</span><h4 id="crossSellTitle">同类客户还买了什么</h4></div>
+                    <b id="crossSellSample">样本待读取</b>
+                  </div>
+                  <div id="crossSellRecommendations" class="cross-sell-recommendations"></div>
+                  <p id="crossSellNote"></p>
+                </article>
+              </div>
+
+              <details id="chatPanel" class="chat-panel">
+                <summary>
+                  <span class="chat-summary-copy"><b>第二步 · 历史文字聊天（已隐去敏感信息）</b><small id="chatMeta">展开后读取最近 20 条</small></span>
+                  <span id="chatCount" class="chat-count">按需查看</span>
+                </summary>
+                <div class="chat-body">
+                  <div class="chat-toolbar">
+                    <p>可选一条客户消息作为判断依据；只保存该条消息的引用，不复制聊天内容。</p>
+                    <button id="loadEarlierMessages" class="secondary hidden" type="button">加载更早</button>
+                  </div>
+                  <div id="chatStatus" class="chat-status" role="status"></div>
+                  <button id="retryMessages" class="secondary hidden" type="button">重新读取聊天</button>
+                  <div id="chatMessages" class="chat-messages" aria-live="polite"></div>
+                  <div id="selectedEvidenceSummary" class="selected-evidence hidden" role="status"></div>
+                </div>
+              </details>
+
+              <form id="reviewForm" class="decision-review">
+                <div class="flow-stage-heading"><span>第三步</span><div><h4>留下你的判断</h4><p>验收开场，也可以纠正客户的促单优先级</p></div></div>
+
+                <label class="revision-notes-field">除了开场，这个客户画像或推荐还要怎么改？<small>可选</small>
+                  <textarea id="revisionNotes" name="revision_notes" rows="4" maxlength="2000" placeholder="例如：不需要问是否顺利收到；可以人工推荐亚麻短裤搭配，但如果订单数据没有共同购买记录，要标明这是搭配建议，不是数据结论。"></textarea>
+                  <span><b id="revisionNotesCount">0</b> / 2000 字</span>
+                </label>
+
+                <fieldset class="priority-feedback-field">
+                  <legend>你觉得这个客户的促单优先级怎么样？<small>可选，不会默认替你判断</small></legend>
+                  <div class="priority-options">
+                    <label><input type="radio" name="priority_assessment" value="accurate"><span><b>基本准确</b><small>当前排序符合你的判断</small></span></label>
+                    <label><input type="radio" name="priority_assessment" value="too_high"><span><b>优先级太高</b><small>应该往后放一些</small></span></label>
+                    <label><input type="radio" name="priority_assessment" value="too_low"><span><b>优先级太低</b><small>应该更早联系</small></span></label>
+                    <label><input type="radio" name="priority_assessment" value="not_suitable"><span><b>暂不适合促单</b><small>先服务或等待更好时机</small></span></label>
+                  </div>
+                </fieldset>
+
+                <div id="priorityReasonFields" class="priority-reason-fields hidden">
+                  <label>主要原因
+                    <select id="priorityReasonCode" name="priority_reason_code">
+                      <option value="">请选择最主要的原因</option>
+                      <option value="clear_intent">清晰意向</option>
+                      <option value="repurchase_potential">复购潜力</option>
+                      <option value="no_recent_need">近期无需求</option>
+                      <option value="refuses_marketing">拒绝营销</option>
+                      <option value="unresolved_aftersales">售后未解决</option>
+                      <option value="recently_purchased">刚购买</option>
+                      <option value="price_resistance">价格阻力</option>
+                      <option value="purchased_elsewhere">已在别处购买</option>
+                      <option value="insufficient_chat_signal">聊天信号不足</option>
+                      <option value="other">其他</option>
+                    </select>
+                  </label>
+                  <label>补充说明（可选）
+                    <textarea id="priorityNote" name="priority_note" rows="2" maxlength="100" placeholder="例如：上次明确说月底再看，现在联系会太早"></textarea>
+                    <small><span id="priorityNoteCount">0</span> / 100 字</small>
+                  </label>
+                </div>
+                <p class="feedback-boundary">这里只记录你的反馈，不会自动修改分数，也不会自动把客户移出名单。</p>
+
+                <fieldset class="verdict-field">
+                  <legend>这条建议开场你会怎么处理？</legend>
+                  <label><input type="radio" name="verdict" value="approved" required><span><b>可以直接用</b><small>这条开场可以直接进入下一步</small></span></label>
+                  <label><input type="radio" name="verdict" value="edited"><span><b>改完可以用</b><small>方向正确，采用你写的新版本</small></span></label>
+                  <label><input type="radio" name="verdict" value="rejected"><span><b>不建议使用</b><small>原开场不合适，改用你写的新版本</small></span></label>
+                </fieldset>
+                <div class="submit-row">
+                  <button id="saveReview" type="submit">保存验收结论</button>
+                  <span id="saveStatus" role="status"></span>
+                </div>
+                <div id="reviewHistory" class="review-history"></div>
+              </form>
+            </div>
+          </section>
+
+          <section class="orders-section">
+            <div class="section-heading"><span>03</span><div><h3>历史订单</h3><p>用真实付款与售后记录核对画像</p></div></div>
+            <div id="orderSummary" class="order-summary">—</div>
+            <div class="table-shell">
+              <table>
+                <thead><tr><th>付款日期</th><th>商品</th><th>成交渠道</th><th>金额</th><th>订单情况</th><th>售后情况</th></tr></thead>
+                <tbody id="orderTableBody"></tbody>
+              </table>
+            </div>
+            <button id="toggleOrders" class="table-toggle hidden" type="button">展开全部订单</button>
+          </section>
+
           <section class="full-card">
-            <div class="section-heading"><span>02</span><div><h3>完整销售画像</h3><p>偏好、驱动力、承诺和风险</p></div></div>
+            <div class="section-heading"><span>04</span><div><h3>销售画像补充</h3><p>偏好、购买动机、历史承诺与风险</p></div></div>
             <div class="card-grid">
               <div><h4>商品偏好</h4><div id="productPreferences"></div></div>
               <div><h4>购买驱动力</h4><div id="purchaseDrivers"></div></div>
@@ -96,38 +242,15 @@
           </section>
 
           <details class="evidence-panel">
-            <summary><span>03 · 证据与可复算事实</span><b id="evidenceCount">0 条</b></summary>
+            <summary><span>05 · 为什么这样判断</span><b id="evidenceCount">0 条</b></summary>
             <div id="factSummary" class="fact-summary"></div>
             <div id="evidenceList" class="evidence-list"></div>
           </details>
 
-          <section class="review-panel">
-            <div class="section-heading"><span>04</span><div><h3>提交验收意见</h3><p>评语会和评分一起保存，建议把“不对在哪里”写清楚</p></div></div>
-            <form id="reviewForm">
-              <label class="reviewer-field">您的称呼<input id="reviewer" maxlength="120" placeholder="例如：王老师 / 品牌方A" required></label>
-              <div id="scoreFields" class="score-fields"></div>
-              <fieldset class="verdict-field">
-                <legend>总体结论</legend>
-                <label><input type="radio" name="verdict" value="approved" required><span><b>可以直接用</b><small>事实与销售表达都合格</small></span></label>
-                <label><input type="radio" name="verdict" value="edited"><span><b>改完可以用</b><small>方向正确，需要具体修改</small></span></label>
-                <label><input type="radio" name="verdict" value="rejected"><span><b>不建议使用</b><small>事实或销售逻辑存在明显问题</small></span></label>
-              </fieldset>
-              <div class="correction-grid">
-                <label>建议如何修改开场<textarea id="openingCorrection" rows="3" placeholder="可直接写出您认为更好的版本"></textarea></label>
-                <label>事实哪里不准确<textarea id="factCorrection" rows="3" placeholder="指出错误事实或需要补充的证据"></textarea></label>
-              </div>
-              <label>其他评语<textarea id="reviewNotes" rows="4" maxlength="4000" placeholder="例如：洞察有用，但太像客服，不像熟客销售；建议更自然一些。"></textarea></label>
-              <div class="submit-row">
-                <button id="saveReview" type="submit">保存这张验收</button>
-                <span id="saveStatus" role="status"></span>
-              </div>
-            </form>
-            <div id="reviewHistory" class="review-history"></div>
-          </section>
         </div>
       </article>
     </main>
-    <footer>匿名历史样本 · 联系前核对最新状态 · 本页没有发送能力</footer>
+    <footer>内部客服使用 · 联系前核对最新状态 · 本页没有发送能力</footer>
   </div>
   <script src="/app.js" defer></script>
 </body>

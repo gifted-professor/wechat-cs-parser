@@ -8,18 +8,49 @@ import threading
 import unittest
 from pathlib import Path
 
-from wechat_cs.review_portal import create_server
+from wechat_cs.identity import global_phone_hmac
+from wechat_cs.review_portal import _ensure_opening_review_schema, create_server
 from wechat_cs.store import initialize_schema
 
 
-ACCESS_CODE = "synthetic-review-access-code-12345"
+HMAC_SECRET = "synthetic-review-hmac-secret-12345"
 NOW = "2026-07-13T20:14:37+08:00"
 
 
 class ReviewPortalTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
-        self.db_path = Path(self.temp_dir.name) / "portal.sqlite3"
+        root = Path(self.temp_dir.name)
+        self.db_path = root / "portal.sqlite3"
+        self.customer_data_path = root / "customer_action_data.json"
+        self.hmac_secret_path = root / "hmac_secret"
+        self.hmac_secret_path.write_text(HMAC_SECRET, encoding="utf-8")
+        self.customer_data_path.write_text(
+            json.dumps(
+                {
+                    "generated_at": NOW,
+                    "customers": [
+                        {
+                            "customer_name": "张三",
+                            "phone": "13800138000",
+                            "platform": "上海一店",
+                        },
+                        {
+                            "customer_name": "李四",
+                            "phone": "13900139000",
+                            "platform": "杭州二店",
+                        },
+                        {
+                            "customer_name": "王五",
+                            "phone": "13700137000",
+                            "platform": "南京三店",
+                        },
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
         conn = sqlite3.connect(str(self.db_path))
         conn.execute("PRAGMA foreign_keys = ON")
         initialize_schema(conn)
@@ -29,8 +60,9 @@ class ReviewPortalTests(unittest.TestCase):
             "127.0.0.1",
             0,
             db_path=self.db_path,
-            access_code=ACCESS_CODE,
             run_id="sales-run",
+            customer_data_path=self.customer_data_path,
+            hmac_secret_path=self.hmac_secret_path,
         )
         self.thread = threading.Thread(
             target=self.server.serve_forever,
@@ -47,7 +79,119 @@ class ReviewPortalTests(unittest.TestCase):
         self.temp_dir.cleanup()
 
     @staticmethod
-    def _seed(conn: sqlite3.Connection) -> None:
+    def _facts(*, blocked: bool, unknown_aftersales: bool = False) -> dict:
+        phone_suffix = "blocked" if blocked else "eligible"
+        base_orders = [
+            {
+                "order_line_id": f"order-line-{phone_suffix}-1",
+                "ordered_at": "2026-05-01T00:00:00+08:00",
+                "ordered_at_time_known": False,
+                "paid_at": "2026-05-01T00:00:00+08:00",
+                "paid_at_time_known": False,
+                "paid_on": "2026-05-01",
+                "revenue_minor": 26800 if not blocked else 88000,
+                "currency": "CNY",
+                "platform": "上海一店" if not blocked else "杭州二店",
+                "sku_name": "棉质短袖 黑色 M" if not blocked else "外套 黑色 M",
+                "factory": "内部厂家字段",
+                "category": "上衣",
+                "color": "黑色",
+                "size": "M",
+                "order_note": "熟客",
+                "refund_type": "return_taro" if blocked else None,
+                "refund_amount_minor": 88000 if blocked else None,
+                "refund_on": "2026-05-04" if blocked else None,
+                "refund_fact_at_cutoff": blocked,
+                "quality_flags": ["internal_flag"],
+            }
+        ]
+        if not blocked:
+            base_orders.extend(
+                [
+                    {
+                        "order_line_id": "order-line-eligible-2",
+                        "ordered_at": "2026-06-01T00:00:00+08:00",
+                        "ordered_at_time_known": False,
+                        "paid_at": "2026-06-01T00:00:00+08:00",
+                        "paid_at_time_known": False,
+                        "paid_on": "2026-06-01",
+                        "revenue_minor": 32000,
+                        "currency": "CNY",
+                        "platform": "上海一店",
+                        "sku_name": "休闲裤",
+                        "factory": "内部厂家字段",
+                        "category": "裤装",
+                        "color": "深蓝",
+                        "size": "M",
+                        "order_note": None,
+                        "refund_type": "cancel",
+                        "refund_amount_minor": 32000,
+                        "refund_on": "2026-06-02",
+                        "refund_fact_at_cutoff": True,
+                        "quality_flags": [],
+                    },
+                    {
+                        "order_line_id": "order-line-eligible-3",
+                        "ordered_at": "2026-07-01T00:00:00+08:00",
+                        "ordered_at_time_known": False,
+                        "paid_at": "2026-07-01T00:00:00+08:00",
+                        "paid_at_time_known": False,
+                        "paid_on": "2026-07-01",
+                        "revenue_minor": 41000,
+                        "currency": "CNY",
+                        "platform": "上海一店",
+                        "sku_name": "运动套装",
+                        "factory": "内部厂家字段",
+                        "category": "套装",
+                        "color": "灰色",
+                        "size": "M",
+                        "order_note": None,
+                        "refund_type": None,
+                        "refund_amount_minor": None,
+                        "refund_on": None,
+                        "refund_fact_at_cutoff": False,
+                        "quality_flags": [],
+                    },
+                ]
+            )
+        total = sum(int(item["revenue_minor"]) for item in base_orders)
+        return {
+            "as_of_at": NOW,
+            "contact_warning": "联系前核对最新状态",
+            "customer_features": {
+                "value_bucket": "high",
+                "rfm_frequency": len(base_orders),
+                "rfm_monetary_minor": total,
+                "rfm_recency_days": 12,
+                "median_repurchase_interval_days": 30 if not blocked else None,
+                "recommended_contact_window": "18:00-24:00",
+                "contact_window_evidence_count": 8,
+                "median_reply_delay_seconds": 62,
+                "unknown_aftersales_count": 1 if unknown_aftersales else 0,
+                "preferred_skus": ["短袖"],
+                "preferred_colors": ["黑色"],
+                "preferred_sizes": ["M"],
+                "order_rhythm": {
+                    "preference_state": "insufficient_evidence",
+                    "preferred_period": None,
+                    "observation_count": 0,
+                },
+            },
+            "member_facts": [
+                {
+                    "member_birthday": "1990-08-08",
+                    "preferred_style": "休闲",
+                    "expected_gift": "上衣",
+                    "member_shop": "静安店" if not blocked else "西湖店",
+                }
+            ],
+            "orders": base_orders,
+            "factory_is_not_brand": True,
+            "point_in_time_snapshots_frozen": True,
+        }
+
+    @classmethod
+    def _seed(cls, conn: sqlite3.Connection) -> None:
         conn.execute(
             "INSERT INTO pipeline_runs(run_id,state,parser_version,hmac_key_fingerprint,"
             "account_config_hash,order_rule_version,card_rule_version,started_at,completed_at,quality_json) "
@@ -58,58 +202,165 @@ class ReviewPortalTests(unittest.TestCase):
             "INSERT INTO source_snapshots(snapshot_id,run_id,source_kind,source_path_hash,device,inode,size,"
             "mtime_ns,sha256,record_count,first_at,last_at,observed_until,captured_at,consistency_state,quality_json) "
             "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            ("snapshot", "source-run", "wechat-live-inbox", "path", 1, 2, 3, 4, "a" * 64, 2, NOW, NOW, NOW, NOW, "stable", "{}"),
+            ("snapshot", "source-run", "wechat-live-inbox", "path", 1, 2, 3, 4, "a" * 64, 6, NOW, NOW, NOW, NOW, "stable", "{}"),
         )
         conn.execute(
-            "INSERT INTO customers(customer_key,display_name,last_active_at,opportunity_score,opportunity_level,"
-            "summary,reasons_json,evidence_json,memory_json,source_file) VALUES(?,?,?,?,?,?,?,?,?,?)",
-            ("customer-1", "张三 13800138000", NOW, 80, "high", "测试", "[]", "[]", "{}", "fixture"),
+            "INSERT INTO order_snapshots(order_snapshot_id,source_snapshot_id,synced_at,record_count,state,quality_json) "
+            "VALUES(?,?,?,?,?,?)",
+            ("orders-snapshot", "snapshot", NOW, 7, "active", "{}"),
         )
         conn.execute(
             "INSERT INTO sales_profile_runs(sales_profile_run_id,source_run_id,as_of_at,status,model,prompt_version,"
-            "profile_schema_version,sampling_version,message_snapshot_id,cohort_hash,config_json,counts_json,quality_json,"
-            "created_at,started_at,completed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            ("sales-run", "source-run", NOW, "complete", "kimi-for-coding", "events-v1", "card-v1", "sampling-v1", "snapshot", "cohort", "{}", "{}", "{}", NOW, NOW, NOW),
+            "profile_schema_version,sampling_version,message_snapshot_id,order_snapshot_id,cohort_hash,config_json,counts_json,quality_json,"
+            "created_at,started_at,completed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("sales-run", "source-run", NOW, "complete", "kimi-for-coding", "events-v1", "card-v1", "sampling-v1", "snapshot", "orders-snapshot", "cohort", "{}", "{}", "{}", NOW, NOW, NOW),
         )
-        conn.execute(
-            "INSERT INTO sales_profile_subjects(subject_id,sales_profile_run_id,customer_key,profile_id,phone_hmac,"
-            "stratum,stratum_rank,selection_reason_json,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,'{}',?,?,?)",
-            ("subject-1", "sales-run", "customer-1", "account-1", "phone-hmac", "high_value", 1, "succeeded", NOW, NOW),
+        fixtures = [
+            ("1", "13800138000", "high_value", 1, False, False),
+            ("2", "13900139000", "complex_risk", 1, True, False),
+            ("3", "13700137000", "control", 1, False, True),
+        ]
+        for suffix, phone, stratum, rank, blocked, unknown_aftersales in fixtures:
+            customer_id = f"customer-{suffix}"
+            subject_id = f"subject-{suffix}"
+            profile_id = f"sales-profile-{suffix}"
+            conn.execute(
+                "INSERT INTO customers(customer_key,display_name,last_active_at,opportunity_score,opportunity_level,"
+                "summary,reasons_json,evidence_json,memory_json,source_file) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (customer_id, f"客户-{suffix}", NOW, 80, "high", "测试", "[]", "[]", "{}", "fixture"),
+            )
+            conn.execute(
+                "INSERT INTO sales_profile_subjects(subject_id,sales_profile_run_id,customer_key,profile_id,phone_hmac,"
+                "stratum,stratum_rank,selection_reason_json,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,'{}',?,?,?)",
+                (subject_id, "sales-run", customer_id, "account-1", global_phone_hmac(HMAC_SECRET, phone), stratum, rank, "succeeded", NOW, NOW),
+            )
+            card = {
+                "customer_value": {"summary": "高价值客户", "facts": ["历史购买稳定"]},
+                "time_rhythm": {"best_contact_time": "晚间联系"},
+                "current_opportunity": {"summary": "适合自然回访"},
+                "natural_opening": "晚上好，之前选的衣服穿着还合适吗？",
+                "product_preferences": {"summary": "偏好舒适休闲款"},
+                "purchase_drivers": ["舒适度"],
+                "historical_commitments": ["晚点再来看看"],
+                "contact_reason": "到了历史复购窗口",
+                "risks": ["先确认上次体验"],
+                "unknowns": [],
+                "evidence": [],
+            }
+            conn.execute(
+                "INSERT INTO sales_profiles(sales_profile_id,subject_id,status,input_hash,idempotency_key,model,prompt_version,"
+                "profile_schema_version,card_version,deterministic_facts_json,profile_json,evidence_json,error_json,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (profile_id, subject_id, "succeeded", f"input-{suffix}", f"idem-{suffix}", "kimi-for-coding", "events-v1", "card-v1", f"card-version-{suffix}", json.dumps(cls._facts(blocked=blocked, unknown_aftersales=unknown_aftersales), ensure_ascii=False), json.dumps(card, ensure_ascii=False), "[]", "{}", NOW, NOW),
+            )
+        current_phone = global_phone_hmac(HMAC_SECRET, "13800138000")
+        order_rows = [
+            ("assoc-current", current_phone, "拉夫劳伦亚麻衬衫 白色 M", ""),
+            ("assoc-buyer-a-anchor", "buyer-a", "拉夫劳伦亚麻款衬衫 绿色 S", ""),
+            ("assoc-buyer-a-other", "buyer-a", "拉夫劳伦亚麻短裤 卡其色 S", ""),
+            ("assoc-buyer-b-anchor", "buyer-b", "拉夫劳伦亚麻衬衫 蓝色 M", ""),
+            ("assoc-buyer-b-other", "buyer-b", "拉夫劳伦亚麻短裤 白色 M", ""),
+            ("assoc-buyer-c-anchor", "buyer-c", "拉夫劳伦亚麻衬衫 粉色 M", "return"),
+            ("assoc-buyer-c-other", "buyer-c", "无效推荐商品 黑色 M", ""),
+        ]
+        conn.executemany(
+            "INSERT INTO orders(order_line_id,order_snapshot_id,source_namespace,record_id,phone_hmac,paid_on,"
+            "revenue_minor,currency,platform,refund_type,return_status,source_hash,quality_flags_json,sku_name) "
+            "VALUES(?, 'orders-snapshot', 'fixture', ?, ?, '2026-07-01', 30000, 'CNY', '测试店', ?, '', ?, '[]', ?)",
+            [
+                (line_id, line_id, phone, refund_type, line_id + "-hash", sku)
+                for line_id, phone, sku, refund_type in order_rows
+            ],
         )
-        facts = {
-            "customer_features": {
-                "value_bucket": "high", "rfm_frequency": 3, "rfm_monetary_minor": 26800,
-                "rfm_recency_days": 12, "recommended_contact_window": "18:00-24:00",
-                "contact_window_evidence_count": 8, "median_reply_delay_seconds": 62,
-                "preferred_skus": ["短袖"], "preferred_colors": ["黑色"], "preferred_sizes": ["M"],
-            },
-            "member_facts": [],
-        }
-        card = {
-            "customer_value": {"summary": "高价值客户", "facts": ["手机号 13800138000 已隐藏"]},
-            "current_opportunity": {"summary": "适合自然回访"},
-            "natural_opening": "晚上好，晚点方便看看吗？",
-            "evidence": [{"sales_profile_event_id": "sales-profile-event-abcdef1234567890"}],
-        }
-        conn.execute(
-            "INSERT INTO sales_profiles(sales_profile_id,subject_id,status,input_hash,idempotency_key,model,prompt_version,"
-            "profile_schema_version,card_version,deterministic_facts_json,profile_json,evidence_json,error_json,created_at,updated_at) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            ("sales-profile-1", "subject-1", "succeeded", "input", "idem", "kimi-for-coding", "events-v1", "card-v1", "card-version-1", json.dumps(facts), json.dumps(card, ensure_ascii=False), "[]", "{}", NOW, NOW),
+        conn.executemany(
+            "INSERT INTO messages(message_key,customer_key,role,timestamp,text,source_file,source_ordinal) "
+            "VALUES(?,?,?,?,?,?,?)",
+            [
+                (
+                    "message-c1-1",
+                    "customer-1",
+                    "customer",
+                    "2026-07-01T09:00:00+08:00",
+                    "电话 13800138000，想看看新款",
+                    "events.jsonl",
+                    1,
+                ),
+                (
+                    "message-c1-2",
+                    "customer-1",
+                    "studio",
+                    "2026-07-02T09:00:00+08:00",
+                    "好的，我帮你留意",
+                    "events.jsonl",
+                    2,
+                ),
+                (
+                    "message-c1-3",
+                    "customer-1",
+                    "customer",
+                    "2026-07-03T09:00:00+08:00",
+                    "想要黑色",
+                    "events.jsonl",
+                    3,
+                ),
+                (
+                    "message-c1-4",
+                    "customer-1",
+                    "customer",
+                    "2026-07-03T09:00:00+08:00",
+                    "M 码优先",
+                    "events.jsonl",
+                    4,
+                ),
+                (
+                    "message-c1-5",
+                    "customer-1",
+                    "customer",
+                    "2026-07-03T09:00:00+08:00",
+                    "有活动告诉我",
+                    "events.jsonl",
+                    5,
+                ),
+                (
+                    "message-c1-future",
+                    "customer-1",
+                    "customer",
+                    "2026-07-14T09:00:00+08:00",
+                    "批次截止后才出现",
+                    "events.jsonl",
+                    6,
+                ),
+                (
+                    "message-c1-after-snapshot",
+                    "customer-1",
+                    "customer",
+                    "2026-07-04T09:00:00+08:00",
+                    "快照行数之外",
+                    "events.jsonl",
+                    7,
+                ),
+                (
+                    "message-c2-1",
+                    "customer-2",
+                    "customer",
+                    "2026-07-03T08:00:00+08:00",
+                    "这是另一位客户的消息",
+                    "events.jsonl",
+                    2,
+                ),
+            ],
         )
         conn.execute(
             "INSERT INTO sales_profile_events(sales_profile_event_id,subject_id,chunk_index,event_type,event_json,"
             "evidence_json,confidence,validation_state,model,prompt_version,input_hash,created_at) "
             "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-            ("event-1", "subject-1", 0, "future_return", json.dumps({"summary": "订单 order-line_abcdef123456 有回访机会"}, ensure_ascii=False), json.dumps([{"kind": "message", "message_key": "message_abcdef", "quote": "电话 13800138000，晚点我再来"}], ensure_ascii=False), 0.9, "accepted", "kimi-for-coding", "events-v1", "event-input", NOW),
+            ("event-1", "subject-1", 0, "future_return", json.dumps({"summary": "有回访机会"}, ensure_ascii=False), json.dumps([{"kind": "message", "message_key": "message_abcdef", "quote": "电话 13800138000，晚点我再来"}], ensure_ascii=False), 0.9, "accepted", "kimi-for-coding", "events-v1", "event-input", NOW),
         )
         conn.commit()
 
-    def request(self, method: str, path: str, payload=None, *, token: str = ACCESS_CODE, host: str = "127.0.0.1"):
+    def request(self, method: str, path: str, payload=None, *, host: str = "127.0.0.1"):
         body = None
         headers = {"Accept": "application/json", "Host": host}
-        if token:
-            headers["X-Review-Access-Code"] = token
         if payload is not None:
             body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
             headers["Content-Type"] = "application/json"
@@ -130,66 +381,309 @@ class ReviewPortalTests(unittest.TestCase):
         payload = {
             "card_version": "card-version-1",
             "verdict": "approved",
-            "scores": {
-                "fact_accuracy": 5, "insight_usefulness": 4, "sales_realism": 5,
-                "timing_quality": 4, "evidence_quality": 5,
-            },
-            "corrections": {}, "notes": "可以使用", "reviewer": "客户评审 A",
+            "suggested_opening": "",
         }
         payload.update(overrides)
         return payload
 
-    def test_access_code_host_and_static_boundary(self) -> None:
-        status, page = self.request("GET", "/", token="")
+    def test_no_access_code_and_host_boundary(self) -> None:
+        status, page = self.request("GET", "/")
         self.assertEqual(status, 200)
-        self.assertIn("Kimi 销售画像验收", page)
-        status, payload = self.request("GET", "/api/summary", token="wrong-code")
-        self.assertEqual((status, payload["error"]["code"]), (401, "unauthorized"))
+        self.assertIn("销售跟进工作台", page)
+        self.assertIn("我来写一版", page)
+        self.assertIn("这个客户画像或推荐还要怎么改", page)
+        self.assertIn("历史订单", page)
+        self.assertNotIn("事实准确度", page)
+        self.assertNotIn("访问码", page)
+        status, payload = self.request("GET", "/api/summary")
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["total"], 3)
         status, payload = self.request("GET", "/api/summary", host="evil.example")
         self.assertEqual((status, payload["error"]["code"]), (403, "host_denied"))
 
-    def test_anonymous_detail_and_evidence_redaction(self) -> None:
-        status, listing = self.request("GET", "/api/profiles")
+    def test_internal_identity_business_metrics_and_enum_translation(self) -> None:
+        status, listing = self.request("GET", "/api/profiles?promotion=all")
         self.assertEqual(status, 200)
-        self.assertEqual(listing["items"][0]["label"], "高价值客户 · 样本 01")
-        self.assertNotIn("display_name", json.dumps(listing, ensure_ascii=False))
+        self.assertEqual(listing["items"][0]["label"], "张三")
+        self.assertEqual(listing["items"][0]["phone_hint"], "138****8000")
+        self.assertTrue(listing["items"][0]["promotion_eligible"])
         status, detail = self.request("GET", "/api/profiles/sales-profile-1")
         self.assertEqual(status, 200)
-        serialized = json.dumps(detail, ensure_ascii=False)
-        self.assertNotIn("13800138000", serialized)
-        self.assertNotIn("message_abcdef", serialized)
-        self.assertNotIn("order-line_abcdef123456", serialized)
-        self.assertNotIn("sales-profile-event-abcdef1234567890", serialized)
-        self.assertEqual(detail["facts"]["inventory_assumption"], "默认满库存，可按历史偏好推荐商品")
+        self.assertEqual(detail["customer"]["name"], "张三")
+        self.assertEqual(detail["customer"]["phone"], "13800138000")
+        self.assertEqual(detail["customer"]["member_shop"], "静安店")
+        self.assertEqual(detail["customer"]["last_order_channel"], "上海一店")
+        self.assertEqual(detail["business"]["paid_order_count"], 2)
+        self.assertEqual(detail["business"]["aftersales_count"], 0)
+        self.assertEqual(detail["business"]["cancelled_count"], 1)
+        self.assertEqual(detail["business"]["median_repurchase_interval_days"], 61.0)
+        self.assertIn("暂无可信下单时段", detail["business"]["order_habit"])
+        self.assertNotIn("休闲裤", detail["facts"]["preferred_products"])
+        serialized_orders = json.dumps(detail["order_history"], ensure_ascii=False)
+        self.assertEqual(detail["order_history"][-1]["product"], "棉质短袖 黑色 M")
+        self.assertIn("订单取消（不计售后）", serialized_orders)
+        self.assertNotIn("cancel", serialized_orders)
+        self.assertNotIn("return_taro", serialized_orders)
+        self.assertNotIn("order-line", serialized_orders)
+        serialized_events = json.dumps(detail["events"], ensure_ascii=False)
+        self.assertNotIn("13800138000", serialized_events)
+        self.assertNotIn("message_abcdef", serialized_events)
         self.assertFalse(detail["send_allowed"])
 
-    def test_review_upsert_and_version_conflict(self) -> None:
+    def test_high_aftersales_customer_is_excluded_and_eligible_list_is_score_sorted(self) -> None:
+        status, summary = self.request("GET", "/api/summary")
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            (summary["promotion_eligible"], summary["promotion_review"], summary["promotion_excluded"]),
+            (1, 1, 1),
+        )
+        status, eligible = self.request("GET", "/api/profiles")
+        self.assertEqual(status, 200)
+        self.assertEqual([item["sales_profile_id"] for item in eligible["items"]], ["sales-profile-1"])
+        status, excluded = self.request("GET", "/api/profiles?promotion=excluded")
+        self.assertEqual(status, 200)
+        self.assertEqual(excluded["items"][0]["sales_profile_id"], "sales-profile-2")
+        self.assertFalse(excluded["items"][0]["promotion_eligible"])
+        self.assertIn("100%", excluded["items"][0]["exclusion_reason"])
+        status, needs_review = self.request("GET", "/api/profiles?promotion=review")
+        self.assertEqual(status, 200)
+        self.assertEqual(needs_review["items"][0]["sales_profile_id"], "sales-profile-3")
+        self.assertEqual(needs_review["items"][0]["promotion_state"], "review")
+        self.assertIn("售后事实待确认", needs_review["items"][0]["exclusion_reason"])
+        status, all_profiles = self.request("GET", "/api/profiles?promotion=all")
+        self.assertEqual(status, 200)
+        self.assertTrue(all_profiles["items"][0]["promotion_eligible"])
+        self.assertEqual(all_profiles["items"][1]["promotion_state"], "review")
+        self.assertFalse(all_profiles["items"][-1]["promotion_eligible"])
+
+    def test_opening_review_upsert_version_conflict_and_no_placeholder_scores(self) -> None:
         status, created = self.request("POST", "/api/profiles/sales-profile-1/review", self.valid_review())
         self.assertEqual(status, 200)
         review_id = created["review"]["review_id"]
-        status, updated = self.request("POST", "/api/profiles/sales-profile-1/review", self.valid_review(notes="第二次修改"))
+        status, updated = self.request(
+            "POST",
+            "/api/profiles/sales-profile-1/review",
+            self.valid_review(verdict="edited", suggested_opening="晚上好，上次那件穿着还舒服吗？"),
+        )
         self.assertEqual(status, 200)
         self.assertEqual(updated["review"]["review_id"], review_id)
-        status, stale = self.request("POST", "/api/profiles/sales-profile-1/review", self.valid_review(card_version="old"))
+        status, stale = self.request(
+            "POST", "/api/profiles/sales-profile-1/review", self.valid_review(card_version="old")
+        )
         self.assertEqual((status, stale["error"]["code"]), (409, "card_version_conflict"))
         conn = sqlite3.connect(str(self.db_path))
         try:
-            count = conn.execute("SELECT COUNT(*) FROM sales_profile_reviews").fetchone()[0]
+            count = conn.execute("SELECT COUNT(*) FROM sales_profile_opening_reviews").fetchone()[0]
+            legacy_count = conn.execute("SELECT COUNT(*) FROM sales_profile_reviews").fetchone()[0]
         finally:
             conn.close()
-        self.assertEqual(count, 1)
+        self.assertEqual((count, legacy_count), (1, 0))
 
-    def test_edited_and_rejected_reviews_require_actionable_comments(self) -> None:
-        status, edited = self.request(
-            "POST", "/api/profiles/sales-profile-1/review",
-            self.valid_review(verdict="edited", corrections={}, notes=""),
+    def test_legacy_device_reviews_are_not_mixed_into_the_shared_team_verdict(self) -> None:
+        conn = sqlite3.connect(str(self.db_path))
+        try:
+            conn.execute(
+                "INSERT INTO sales_profile_opening_reviews(review_id,sales_profile_id,card_version,verdict,"
+                "source_opening,suggested_opening,reviewer_key,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?)",
+                (
+                    "legacy-device-review",
+                    "sales-profile-1",
+                    "card-version-1",
+                    "rejected",
+                    "旧开场",
+                    "旧建议",
+                    "operator-legacy-device",
+                    NOW,
+                    NOW,
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        status, summary = self.request("GET", "/api/summary")
+        self.assertEqual(status, 200)
+        self.assertEqual((summary["reviewed"], summary["verdicts"]), (0, {}))
+        status, detail = self.request("GET", "/api/profiles/sales-profile-1")
+        self.assertEqual(status, 200)
+        self.assertEqual(detail["reviews"], [])
+
+        status, _ = self.request("POST", "/api/profiles/sales-profile-1/review", self.valid_review())
+        self.assertEqual(status, 200)
+        status, detail = self.request("GET", "/api/profiles/sales-profile-1")
+        self.assertEqual(status, 200)
+        self.assertEqual(len(detail["reviews"]), 1)
+        self.assertEqual(detail["reviews"][0]["verdict"], "approved")
+
+    def test_edited_and_rejected_reviews_require_a_better_opening(self) -> None:
+        for verdict in ("edited", "rejected"):
+            status, payload = self.request(
+                "POST",
+                "/api/profiles/sales-profile-1/review",
+                self.valid_review(verdict=verdict, suggested_opening=""),
+            )
+            self.assertEqual((status, payload["error"]["code"]), (400, "missing_opening_suggestion"))
+        status, unchanged = self.request(
+            "POST",
+            "/api/profiles/sales-profile-1/review",
+            self.valid_review(
+                verdict="edited",
+                suggested_opening="晚上好，之前选的衣服穿着还合适吗？",
+            ),
         )
-        self.assertEqual((status, edited["error"]["code"]), (400, "missing_corrections"))
-        status, rejected = self.request(
-            "POST", "/api/profiles/sales-profile-1/review",
-            self.valid_review(verdict="rejected", corrections={}, notes=""),
+        self.assertEqual((status, unchanged["error"]["code"]), (400, "unchanged_opening_suggestion"))
+        status, sanitized = self.request(
+            "POST",
+            "/api/profiles/sales-profile-1/review",
+            self.valid_review(
+                verdict="edited",
+                suggested_opening=(
+                    "张 三你好，请不要把 138-0013-8000 或 "
+                    "310101-19900101-123X 写进训练反馈。"
+                ),
+            ),
         )
-        self.assertEqual((status, rejected["error"]["code"]), (400, "missing_rejection_reason"))
+        self.assertEqual(status, 200)
+        self.assertNotIn("张三", sanitized["review"]["suggested_opening"])
+        self.assertNotIn("张 三", sanitized["review"]["suggested_opening"])
+        self.assertNotIn("138-0013-8000", sanitized["review"]["suggested_opening"])
+        self.assertNotIn("310101-19900101-123X", sanitized["review"]["suggested_opening"])
+        conn = sqlite3.connect(str(self.db_path))
+        try:
+            stored_opening = conn.execute(
+                "SELECT suggested_opening FROM sales_profile_opening_reviews "
+                "WHERE sales_profile_id='sales-profile-1'"
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        self.assertNotIn("张 三", stored_opening)
+        self.assertNotIn("138-0013-8000", stored_opening)
+        self.assertNotIn("310101-19900101-123X", stored_opening)
+
+    def test_message_snapshot_pagination_and_safe_fields(self) -> None:
+        status, first = self.request(
+            "GET", "/api/profiles/sales-profile-1/messages?limit=2"
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(first["total"], 5)
+        self.assertTrue(first["has_more"])
+        self.assertTrue(first["next_cursor"])
+        self.assertEqual(
+            [item["message_ref"] for item in first["items"]],
+            ["message-c1-4", "message-c1-5"],
+        )
+        self.assertEqual(
+            set(first["items"][0]),
+            {"message_ref", "role", "timestamp", "text"},
+        )
+        cursor = first["next_cursor"]
+        status, second = self.request(
+            "GET", f"/api/profiles/sales-profile-1/messages?limit=2&before={cursor}"
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            [item["message_ref"] for item in second["items"]],
+            ["message-c1-2", "message-c1-3"],
+        )
+        serialized = json.dumps(first, ensure_ascii=False)
+        self.assertNotIn("source_file", serialized)
+        self.assertNotIn("source_ordinal", serialized)
+        self.assertNotIn("批次截止后才出现", serialized)
+        self.assertNotIn("快照行数之外", serialized)
+
+    def test_priority_revision_and_message_evidence_are_saved_and_legacy_retry_preserves_them(self) -> None:
+        status, created = self.request(
+            "POST",
+            "/api/profiles/sales-profile-1/review",
+            self.valid_review(
+                verdict="edited",
+                suggested_opening="晚上好，最近到了适合你的休闲新款，要不要先看两件？",
+                priority_assessment="too_low",
+                priority_reason_code="clear_intent",
+                priority_note="客户明确说过想看新款",
+                evidence_message_ref="message-c1-5",
+                revision_notes="张三不需要再问 13800138000 是否顺利收到，要直接给搭配建议。",
+            ),
+        )
+        self.assertEqual(status, 200)
+        review = created["review"]
+        self.assertEqual(review["priority_assessment"], "too_low")
+        self.assertEqual(review["evidence_message_ref"], "message-c1-5")
+        self.assertNotIn("张三", review["revision_notes"])
+        self.assertNotIn("13800138000", review["revision_notes"])
+
+        status, retried = self.request(
+            "POST", "/api/profiles/sales-profile-1/review", self.valid_review()
+        )
+        self.assertEqual(status, 200)
+        preserved = retried["review"]
+        self.assertEqual(preserved["priority_assessment"], "too_low")
+        self.assertEqual(preserved["priority_reason_code"], "clear_intent")
+        self.assertEqual(preserved["evidence_message_ref"], "message-c1-5")
+        self.assertTrue(preserved["revision_notes"])
+
+        status, missing_reason = self.request(
+            "POST",
+            "/api/profiles/sales-profile-1/review",
+            self.valid_review(priority_assessment="not_suitable"),
+        )
+        self.assertEqual(
+            (status, missing_reason["error"]["code"]),
+            (400, "missing_priority_reason"),
+        )
+
+    def test_cross_sell_uses_only_valid_other_buyers(self) -> None:
+        status, detail = self.request("GET", "/api/profiles/sales-profile-1")
+        self.assertEqual(status, 200)
+        cross_sell = detail["cross_sell"]
+        self.assertTrue(cross_sell["available"])
+        self.assertEqual(cross_sell["anchor_product"], "拉夫劳伦亚麻衬衫")
+        self.assertEqual((cross_sell["buyer_count"], cross_sell["other_buyer_count"]), (3, 2))
+        self.assertEqual(
+            cross_sell["recommendations"][0],
+            {"product": "拉夫劳伦亚麻短裤", "supporting_buyers": 2},
+        )
+        self.assertNotIn("无效推荐商品", json.dumps(cross_sell, ensure_ascii=False))
+
+    def test_additive_review_schema_migration_preserves_legacy_row(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "legacy.sqlite3"
+            conn = sqlite3.connect(str(path))
+            conn.execute(
+                "CREATE TABLE sales_profile_opening_reviews("
+                "review_id TEXT PRIMARY KEY,sales_profile_id TEXT NOT NULL,card_version TEXT NOT NULL,"
+                "verdict TEXT NOT NULL,source_opening TEXT NOT NULL,suggested_opening TEXT NOT NULL DEFAULT '',"
+                "reviewer_key TEXT NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,"
+                "UNIQUE(sales_profile_id,reviewer_key))"
+            )
+            legacy = (
+                "legacy-review", "sales-profile-legacy", "card-v1", "rejected",
+                "旧开场", "旧建议", "shared", NOW, NOW,
+            )
+            conn.execute(
+                "INSERT INTO sales_profile_opening_reviews VALUES(?,?,?,?,?,?,?,?,?)",
+                legacy,
+            )
+            conn.commit()
+            conn.close()
+
+            _ensure_opening_review_schema(path)
+            conn = sqlite3.connect(str(path))
+            try:
+                actual = conn.execute(
+                    "SELECT review_id,sales_profile_id,card_version,verdict,source_opening,"
+                    "suggested_opening,reviewer_key,created_at,updated_at "
+                    "FROM sales_profile_opening_reviews"
+                ).fetchone()
+                additions = conn.execute(
+                    "SELECT priority_assessment,priority_reason_code,priority_note,"
+                    "evidence_message_ref,chat_snapshot_at,revision_notes "
+                    "FROM sales_profile_opening_reviews"
+                ).fetchone()
+            finally:
+                conn.close()
+            self.assertEqual(actual, legacy)
+            self.assertEqual(additions, ("", "", "", "", "", ""))
 
     def test_no_model_or_send_route(self) -> None:
         for path in ("/api/profiles/sales-profile-1/send", "/api/run", "/v1/sales-profile-pilot"):

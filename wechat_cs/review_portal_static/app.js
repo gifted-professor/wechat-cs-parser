@@ -1,30 +1,84 @@
 'use strict';
 
-const state = { token: '', profiles: [], current: null, scores: {} };
+const state = {
+  profiles: [],
+  current: null,
+  ordersExpanded: false,
+  messages: [],
+  messagesLoaded: false,
+  messagesLoading: false,
+  messagesHasMore: false,
+  messagesNextCursor: '',
+  messagesTotal: 0,
+  messagesSnapshotAt: '',
+  messageRequestToken: 0,
+  selectedEvidenceRef: '',
+};
+
 const $ = selector => document.querySelector(selector);
 
-const labels = {
-  customer_value: '客户价值', summary: '结论', facts: '依据', best_contact_time: '最佳联系时间',
-  items: '偏好明细', current_opportunity: '当前机会', natural_opening: '建议开场',
-};
 const stratumLabels = {
-  complex_risk: '售后关怀', future_return_wait: '回访等待', high_frequency: '高频客户',
-  high_value: '高价值客户', dormant_repeat: '沉睡复购', control: '普通对照',
+  complex_risk: '售后关怀',
+  future_return_wait: '回访等待',
+  high_frequency: '高频客户',
+  high_value: '高价值客户',
+  dormant_repeat: '沉睡复购',
+  control: '普通客户',
 };
-const verdictLabels = { approved: '可以直接用', edited: '改完可以用', rejected: '不建议使用' };
-const eventLabels = {
-  brand_preference: '品牌偏好', product_preference: '商品偏好', aftersales: '售后信号',
-  delayed_purchase: '延迟购买', price_hesitation: '价格犹豫', stock_wait: '等待到货',
-  birthday_clue: '生日线索', relationship_signal: '关系信号',
-  promotion_or_payday_wait: '活动 / 发薪等待', future_return: '未来回访', contact_refusal: '拒绝联系',
+
+const verdictLabels = {
+  approved: '可以直接用',
+  edited: '改完可以用',
+  rejected: '不建议使用',
 };
-const scoreDefinitions = [
-  ['fact_accuracy', '事实准确度', '历史事实有没有说错'],
-  ['insight_usefulness', '洞察实用性', '能不能帮助销售判断'],
-  ['sales_realism', '销售真实感', '像不像真实熟客销售'],
-  ['timing_quality', '联系时机', '联系时间和理由是否合理'],
-  ['evidence_quality', '证据质量', '结论是否有证据支撑'],
-];
+
+const priorityAssessmentLabels = {
+  accurate: '基本准确',
+  too_high: '优先级太高',
+  too_low: '优先级太低',
+  not_suitable: '暂不适合促单',
+};
+
+const priorityReasonLabels = {
+  clear_intent: '清晰意向',
+  repurchase_potential: '复购潜力',
+  no_recent_need: '近期无需求',
+  refuses_marketing: '拒绝营销',
+  unresolved_aftersales: '售后未解决',
+  recently_purchased: '刚购买',
+  price_resistance: '价格阻力',
+  purchased_elsewhere: '已在别处购买',
+  insufficient_chat_signal: '聊天信号不足',
+  other: '其他',
+};
+
+const fieldLabels = {
+  summary: '',
+  reason: '原因',
+  recommendation: '建议',
+  best_contact_time: '适合联系时间',
+  preferred_products: '偏好商品',
+  preferred_colors: '偏好颜色',
+  preferred_sizes: '偏好尺码',
+  items: '',
+  facts: '历史依据',
+};
+
+const valueLabels = {
+  high: '高',
+  medium: '中',
+  low: '低',
+  supported: '有历史记录支持',
+  insufficient: '历史记录不足',
+  unknown: '暂不确定',
+  true: '是',
+  false: '否',
+  return_taro: '退芋圆',
+  return: '退货退款',
+  exchange: '换货',
+  compensation: '补偿处理',
+  cancel: '订单取消（不计售后）',
+};
 
 function element(tag, className = '', text = '') {
   const node = document.createElement(tag);
@@ -33,13 +87,17 @@ function element(tag, className = '', text = '') {
   return node;
 }
 
+function setText(selector, value, fallback = '—') {
+  const node = $(selector);
+  if (node) node.textContent = value === null || value === undefined || value === '' ? fallback : String(value);
+}
+
 async function api(path, options = {}) {
   const response = await fetch(path, {
     ...options,
     cache: 'no-store',
     headers: {
       Accept: 'application/json',
-      'X-Review-Access-Code': state.token,
       ...(options.body ? { 'Content-Type': 'application/json' } : {}),
     },
   });
@@ -53,157 +111,443 @@ async function api(path, options = {}) {
   return payload;
 }
 
-function formatDate(value) {
-  if (!value) return '时间未知';
+function formatDate(value, withTime = false) {
+  if (!value) return '时间待补全';
   const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return String(value);
-  return new Intl.DateTimeFormat('zh-CN', { year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit' }).format(date);
+  if (Number.isNaN(date.getTime())) return humanize(value);
+  const options = { year: 'numeric', month: 'long', day: 'numeric' };
+  if (withTime) Object.assign(options, { hour: '2-digit', minute: '2-digit' });
+  return new Intl.DateTimeFormat('zh-CN', options).format(date);
 }
 
-function renderValue(container, value, empty = '证据不足，暂不判断') {
+function formatChatTime(value) {
+  if (!value) return '时间待补全';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return humanize(value);
+  return new Intl.DateTimeFormat('zh-CN', {
+    month: 'numeric',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(date);
+}
+
+function money(value) {
+  const amount = Number(value);
+  if (!Number.isFinite(amount)) return '待补全';
+  return new Intl.NumberFormat('zh-CN', {
+    style: 'currency',
+    currency: 'CNY',
+    minimumFractionDigits: amount % 1 ? 2 : 0,
+    maximumFractionDigits: 2,
+  }).format(amount);
+}
+
+function humanize(value) {
+  if (value === null || value === undefined || value === '') return '';
+  if (typeof value === 'boolean') return value ? '是' : '否';
+  const raw = String(value).trim();
+  if (!raw) return '';
+  const exact = valueLabels[raw.toLowerCase()];
+  if (exact) return exact;
+  return raw
+    .replace(/消息快照/g, '聊天记录')
+    .replace(/日期占位/g, '日期记录')
+    .replace(/\bRFM\b/gi, '历史购买表现')
+    .replace(/\bFrequency\b/gi, '购买次数')
+    .replace(/\bRecency\b/gi, '距上次购买')
+    .replace(/\bMonetary\b/gi, '累计消费')
+    .replace(/quality_flags/gi, '需要核对的数据')
+    .replace(/return_taro/gi, '退芋圆')
+    .replace(/\bcancel\b/gi, '订单取消（不计售后）')
+    .replace(/\bcompensation\b/gi, '补偿处理')
+    .replace(/\bexchange\b/gi, '换货')
+    .replace(/\breturn\b/gi, '退货退款');
+}
+
+function isTechnicalKey(key) {
+  return /(?:^|_)(?:id|ids|version|confidence|score|count|rate|ratio|state|rule|evidence|source|hash|raw|minor|seconds|bucket|rank|type|model|field|value|index)(?:_|$)/i.test(key)
+    || ['quality_flags', 'parameters', 'metadata'].includes(key);
+}
+
+function narrativeLines(value, depth = 0) {
+  if (depth > 5 || value === null || value === undefined || value === '') return [];
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+    const copy = humanize(value);
+    return copy ? [copy] : [];
+  }
+  if (Array.isArray(value)) return value.flatMap(item => narrativeLines(item, depth + 1));
+  if (typeof value !== 'object') return [];
+
+  const entries = Object.entries(value);
+  const preferred = ['summary', 'reason', 'recommendation', 'best_contact_time', 'items', 'facts'];
+  const ordered = [
+    ...preferred.flatMap(key => entries.filter(([entryKey]) => entryKey === key)),
+    ...entries.filter(([key]) => !preferred.includes(key)),
+  ];
+  return ordered.flatMap(([key, item]) => {
+    if (isTechnicalKey(key)) return [];
+    const lines = narrativeLines(item, depth + 1);
+    const label = fieldLabels[key];
+    if (!label || !lines.length) return lines;
+    return [`${label}：${lines.join('；')}`];
+  });
+}
+
+function renderNarrative(container, value, empty = '历史依据不足，暂不判断') {
   container.replaceChildren();
-  if (value === null || value === undefined || value === '' || (Array.isArray(value) && !value.length)) {
-    container.append(element('p', 'empty-copy', empty)); return;
-  }
-  if (Array.isArray(value)) {
-    const list = element('ul');
-    value.forEach(item => list.append(element('li', '', compact(item))));
-    container.append(list); return;
-  }
-  if (typeof value === 'object') {
-    const summary = value.summary || value.best_contact_time;
-    if (summary) container.append(element('p', '', compact(summary)));
-    const rest = Object.entries(value).filter(([key]) => !['summary', 'best_contact_time'].includes(key));
-    if (rest.length) {
-      const list = element('ul');
-      rest.forEach(([key, item]) => list.append(element('li', '', `${labels[key] || key}：${compact(item)}`)));
-      container.append(list);
-    }
+  const lines = [...new Set(narrativeLines(value).map(line => line.trim()).filter(Boolean))];
+  if (!lines.length) {
+    container.append(element('p', 'empty-copy', empty));
     return;
   }
-  container.append(element('p', '', compact(value)));
+  if (lines.length === 1) {
+    container.append(element('p', '', lines[0]));
+    return;
+  }
+  const list = element('ul');
+  lines.forEach(line => list.append(element('li', '', line)));
+  container.append(list);
 }
 
-function compact(value) {
-  if (value === null || value === undefined || value === '') return '未知';
-  if (Array.isArray(value)) return value.map(compact).join('；');
-  if (typeof value === 'object') return Object.entries(value).map(([key, item]) => `${labels[key] || key}：${compact(item)}`).join('；');
-  if (typeof value === 'boolean') return value ? '是' : '否';
-  return String(value);
+function renderOpeningCaution(opening) {
+  const warning = $('#openingCaution');
+  const text = narrativeLines(opening).join(' ');
+  const asksAboutReceipt = /顺利收到|收到.{0,8}[吗嘛？?]|还需要跟进/.test(text);
+  warning.classList.toggle('hidden', !asksAboutReceipt);
+  warning.textContent = asksAboutReceipt
+    ? '开场提醒：页面没有显示“未解决售后”时，不要把“是否顺利收到”当作默认寒暄。直接从客户偏好、搭配机会或明确需求切入。'
+    : '';
 }
 
-function renderScoreFields() {
-  const container = $('#scoreFields');
-  scoreDefinitions.forEach(([name, label, hint]) => {
-    const field = element('fieldset', 'score-field');
-    const legend = element('legend');
-    legend.append(element('b', '', label), element('small', '', hint));
-    field.append(legend);
-    const buttons = element('div', 'score-buttons');
-    for (let value = 1; value <= 5; value += 1) {
-      const button = element('button', '', String(value));
-      button.type = 'button';
-      button.dataset.score = name;
-      button.dataset.value = String(value);
-      button.setAttribute('aria-label', `${label} ${value} 分`);
-      button.addEventListener('click', () => setScore(name, value));
-      buttons.append(button);
-    }
-    field.append(buttons);
-    container.append(field);
-  });
+function renderCrossSell(data) {
+  const card = $('#crossSellCard');
+  const recommendations = Array.isArray(data.recommendations) ? data.recommendations : [];
+  card.classList.toggle('hidden', !data.available);
+  if (!data.available) return;
+  setText('#crossSellTitle', `买过「${data.anchor_product || '同类商品'}」的客户还买了`);
+  setText(
+    '#crossSellSample',
+    `${data.buyer_count || 0} 位买家 · 其中 ${data.other_buyer_count || 0} 位可比较`,
+  );
+  const container = $('#crossSellRecommendations');
+  container.replaceChildren();
+  if (!recommendations.length) {
+    container.append(element('p', 'empty-copy', '暂时没有足够的共同购买记录；可填写人工搭配建议，但不要写成数据结论。'));
+  } else {
+    recommendations.forEach(item => {
+      const entry = element('article');
+      const support = Number(item.supporting_buyers) || 0;
+      entry.append(
+        element('b', '', item.product || '商品待确认'),
+        element('small', '', `${support} 位其他买家买过${support < 2 ? ' · 样本较小' : ''}`),
+      );
+      container.append(entry);
+    });
+  }
+  setText('#crossSellNote', data.method_note, '只展示冻结订单中的真实共同购买记录。');
 }
 
-function setScore(name, value) {
-  state.scores[name] = Number(value);
-  document.querySelectorAll(`[data-score="${name}"]`).forEach(button => {
-    button.classList.toggle('selected', Number(button.dataset.value) === Number(value));
-  });
+function showOpeningEditor({ focus = true } = {}) {
+  const editor = $('#openingEditor');
+  editor.classList.remove('hidden');
+  const textarea = $('#suggestedOpening');
+  if (focus) textarea.focus({ preventScroll: false });
+}
+
+function syncPriorityReasonFields({ clear = false } = {}) {
+  const assessment = document.querySelector('[name="priority_assessment"]:checked')?.value || '';
+  const needsReason = ['too_high', 'too_low', 'not_suitable'].includes(assessment);
+  $('#priorityReasonFields').classList.toggle('hidden', !needsReason);
+  $('#priorityReasonCode').required = needsReason;
+  if (!needsReason && clear) {
+    $('#priorityReasonCode').value = '';
+    $('#priorityNote').value = '';
+    setText('#priorityNoteCount', '0');
+  }
+}
+
+function renderSelectedEvidenceSummary() {
+  const summary = $('#selectedEvidenceSummary');
+  summary.replaceChildren();
+  if (!state.selectedEvidenceRef) {
+    summary.classList.add('hidden');
+    return;
+  }
+  const selected = state.messages.find(item => item.message_ref === state.selectedEvidenceRef);
+  const copy = selected
+    ? `已选择 ${formatChatTime(selected.timestamp)} 的客户消息作为判断依据。`
+    : '已选择一条客户消息作为判断依据；展开聊天后可以查看或取消。';
+  summary.append(element('span', '', copy));
+  const cancel = element('button', '', '取消选择');
+  cancel.type = 'button';
+  cancel.addEventListener('click', () => selectEvidenceMessage(''));
+  summary.append(cancel);
+  summary.classList.remove('hidden');
 }
 
 function resetReviewForm() {
-  state.scores = {};
-  document.querySelectorAll('[data-score]').forEach(button => button.classList.remove('selected'));
   document.querySelectorAll('[name="verdict"]').forEach(input => { input.checked = false; });
-  $('#openingCorrection').value = '';
-  $('#factCorrection').value = '';
-  $('#reviewNotes').value = '';
-  $('#saveStatus').textContent = '';
+  document.querySelectorAll('[name="priority_assessment"]').forEach(input => { input.checked = false; });
+  $('#suggestedOpening').value = '';
+  $('#openingEditor').classList.add('hidden');
+  $('#priorityReasonCode').value = '';
+  $('#priorityNote').value = '';
+  $('#revisionNotes').value = '';
+  setText('#priorityNoteCount', '0');
+  setText('#revisionNotesCount', '0');
+  $('#priorityReasonFields').classList.add('hidden');
+  $('#priorityReasonCode').required = false;
+  state.selectedEvidenceRef = '';
+  renderSelectedEvidenceSummary();
+  setText('#saveStatus', '', '');
 }
 
 function fillOwnReview(detail) {
   resetReviewForm();
-  const reviewer = $('#reviewer').value.trim();
-  const review = detail.reviews.find(item => item.reviewer === reviewer);
+  const review = (detail.reviews || [])[0];
   if (!review) return;
-  Object.entries(review.scores || {}).forEach(([name, value]) => setScore(name, value));
   const verdict = document.querySelector(`[name="verdict"][value="${review.verdict}"]`);
   if (verdict) verdict.checked = true;
-  $('#openingCorrection').value = review.corrections?.natural_opening || '';
-  $('#factCorrection').value = review.corrections?.fact_correction || '';
-  $('#reviewNotes').value = review.notes || '';
+  if (review.suggested_opening) $('#suggestedOpening').value = review.suggested_opening;
+  if (['edited', 'rejected'].includes(review.verdict)) {
+    showOpeningEditor({ focus: false });
+  }
+  const assessment = document.querySelector(
+    `[name="priority_assessment"][value="${review.priority_assessment || ''}"]`,
+  );
+  if (assessment) assessment.checked = true;
+  if (review.priority_reason_code && priorityReasonLabels[review.priority_reason_code]) {
+    $('#priorityReasonCode').value = review.priority_reason_code;
+  }
+  $('#priorityNote').value = review.priority_note || '';
+  $('#revisionNotes').value = review.revision_notes || '';
+  setText('#priorityNoteCount', String($('#priorityNote').value.length));
+  setText('#revisionNotesCount', String($('#revisionNotes').value.length));
+  state.selectedEvidenceRef = review.evidence_message_ref || '';
+  syncPriorityReasonFields();
+  renderSelectedEvidenceSummary();
 }
 
-async function login(event) {
-  event.preventDefault();
-  const code = $('#accessCode').value.trim();
-  if (!code) return;
-  state.token = code;
-  $('#loginStatus').textContent = '正在验证…';
+function resetMessages() {
+  state.messageRequestToken += 1;
+  state.messages = [];
+  state.messagesLoaded = false;
+  state.messagesLoading = false;
+  state.messagesHasMore = false;
+  state.messagesNextCursor = '';
+  state.messagesTotal = 0;
+  state.messagesSnapshotAt = '';
+  $('#chatPanel').open = false;
+  $('#chatMessages').replaceChildren();
+  $('#chatStatus').replaceChildren();
+  $('#loadEarlierMessages').classList.add('hidden');
+  $('#retryMessages').classList.add('hidden');
+  setText('#chatMeta', '展开后读取最近 20 条');
+  setText('#chatCount', '按需查看');
+}
+
+function isCustomerMessage(role) {
+  return ['customer', 'client', 'buyer', 'user'].includes(String(role || '').toLowerCase());
+}
+
+function selectEvidenceMessage(messageRef) {
+  state.selectedEvidenceRef = state.selectedEvidenceRef === messageRef ? '' : messageRef;
+  document.querySelectorAll('.chat-message').forEach(item => {
+    const selected = Boolean(state.selectedEvidenceRef) && item.dataset.messageRef === state.selectedEvidenceRef;
+    item.classList.toggle('selected-evidence-message', selected);
+    const button = item.querySelector('.evidence-toggle');
+    if (button) {
+      button.textContent = selected ? '取消作为依据' : '作为判断依据';
+      button.setAttribute('aria-pressed', selected ? 'true' : 'false');
+    }
+  });
+  renderSelectedEvidenceSummary();
+}
+
+function renderMessages({ preserveScroll = false } = {}) {
+  const container = $('#chatMessages');
+  const previousHeight = container.scrollHeight;
+  const previousTop = container.scrollTop;
+  container.replaceChildren();
+
+  if (!state.messages.length) {
+    container.append(element('p', 'chat-empty', '没有可展示的历史文字聊天'));
+  }
+
+  state.messages.forEach(message => {
+    const customerMessage = isCustomerMessage(message.role);
+    const selected = Boolean(state.selectedEvidenceRef)
+      && message.message_ref === state.selectedEvidenceRef;
+    const item = element(
+      'article',
+      `chat-message ${customerMessage ? 'customer-message' : 'staff-message'}${selected ? ' selected-evidence-message' : ''}`,
+    );
+    item.dataset.messageRef = message.message_ref || '';
+
+    const head = element('div', 'message-head');
+    head.append(
+      element('b', '', customerMessage ? '客户' : '客服'),
+      element('time', '', formatChatTime(message.timestamp)),
+    );
+    item.append(head, element('p', '', message.text || '（无可展示文字）'));
+
+    if (customerMessage && message.message_ref) {
+      const evidenceButton = element(
+        'button',
+        'evidence-toggle',
+        selected ? '取消作为依据' : '作为判断依据',
+      );
+      evidenceButton.type = 'button';
+      evidenceButton.setAttribute('aria-pressed', selected ? 'true' : 'false');
+      evidenceButton.addEventListener('click', () => selectEvidenceMessage(message.message_ref));
+      item.append(evidenceButton);
+    }
+    container.append(item);
+  });
+
+  if (preserveScroll) {
+    container.scrollTop = container.scrollHeight - previousHeight + previousTop;
+  } else {
+    container.scrollTop = container.scrollHeight;
+  }
+  renderSelectedEvidenceSummary();
+}
+
+async function loadMessages({ before = '' } = {}) {
+  if (!state.current || state.messagesLoading) return;
+  const profileId = state.current.sales_profile_id;
+  const requestToken = ++state.messageRequestToken;
+  const loadingEarlier = Boolean(before);
+  state.messagesLoading = true;
+  $('#retryMessages').classList.add('hidden');
+  $('#loadEarlierMessages').disabled = true;
+  setText('#chatStatus', loadingEarlier ? '正在读取更早的聊天…' : '正在读取最近 20 条聊天…');
+
   try {
-    await api('/api/summary');
-    sessionStorage.setItem('reviewAccessCode', code);
-    $('#loginGate').classList.add('hidden');
-    $('#portal').classList.remove('hidden');
-    await refreshAll();
+    const params = new URLSearchParams({ limit: '20' });
+    if (before) params.set('before', before);
+    const payload = await api(
+      `/api/profiles/${encodeURIComponent(profileId)}/messages?${params.toString()}`,
+    );
+    if (requestToken !== state.messageRequestToken || state.current?.sales_profile_id !== profileId) return;
+
+    const incoming = Array.isArray(payload.items) ? payload.items : [];
+    const combined = loadingEarlier ? [...incoming, ...state.messages] : incoming;
+    const seen = new Set();
+    state.messages = combined.filter(message => {
+      const ref = String(message.message_ref || '');
+      if (!ref || seen.has(ref)) return false;
+      seen.add(ref);
+      return true;
+    });
+    state.messagesLoaded = true;
+    state.messagesHasMore = Boolean(payload.has_more);
+    state.messagesNextCursor = payload.next_cursor || '';
+    state.messagesTotal = Number(payload.total) || state.messages.length;
+    state.messagesSnapshotAt = payload.snapshot_at || '';
+
+    renderMessages({ preserveScroll: loadingEarlier });
+    setText('#chatStatus', '', '');
+    setText('#chatCount', `已显示 ${state.messages.length} / ${state.messagesTotal} 条`);
+    setText(
+      '#chatMeta',
+      state.messagesSnapshotAt
+        ? `聊天记录截至 ${formatDate(state.messagesSnapshotAt, true)}`
+        : '聊天记录来自当前冻结数据',
+    );
+    $('#loadEarlierMessages').classList.toggle(
+      'hidden',
+      !state.messagesHasMore || !state.messagesNextCursor,
+    );
+    $('#loadEarlierMessages').textContent = `加载更早（已显示 ${state.messages.length} 条）`;
   } catch (error) {
-    state.token = '';
-    $('#loginStatus').textContent = error.message;
+    if (requestToken !== state.messageRequestToken) return;
+    setText('#chatStatus', `聊天读取失败：${error.message}`);
+    $('#retryMessages').classList.remove('hidden');
+  } finally {
+    if (requestToken === state.messageRequestToken) {
+      state.messagesLoading = false;
+      $('#loadEarlierMessages').disabled = false;
+    }
   }
 }
 
 async function refreshAll() {
-  const [summary] = await Promise.all([loadSummary(), loadProfiles(false)]);
-  return summary;
+  await Promise.all([loadSummary(), loadProfiles(false)]);
 }
 
 async function loadSummary() {
   const summary = await api('/api/summary');
-  $('#generatedCount').textContent = summary.generated;
-  $('#reviewedCount').textContent = summary.reviewed;
-  $('#reviewProgress').textContent = `${summary.reviewed} / ${summary.total} 已有审核`;
-  $('#verdictCounts').textContent = `${summary.verdicts.approved || 0} / ${summary.verdicts.edited || 0} / ${summary.verdicts.rejected || 0}`;
-  $('#progressBar').style.width = `${summary.total ? Math.round(summary.reviewed / summary.total * 100) : 0}%`;
-  $('#runMeta').textContent = `数据截至 ${formatDate(summary.run.as_of_at)} · ${summary.run.model} · 仅用于人工验收`;
+  setText('#generatedCount', summary.generated);
+  setText('#eligibleCount', summary.promotion_eligible);
+  setText('#reviewCount', summary.promotion_review);
+  setText('#excludedCount', summary.promotion_excluded);
+  setText('#reviewedCount', summary.reviewed);
+  setText('#reviewProgress', `${summary.reviewed} / ${summary.total} 已验收`);
+  const percent = summary.total ? Math.round(summary.reviewed / summary.total * 100) : 0;
+  $('#progressBar').style.width = `${percent}%`;
+  const identityUpdated = summary.customer_source_synced_at
+    ? ` · 客户资料更新于 ${formatDate(summary.customer_source_synced_at, true)}`
+    : '';
+  setText('#runMeta', `画像数据截至 ${formatDate(summary.run?.as_of_at)}${identityUpdated} · 联系前仍需核对最新状态`);
   return summary;
 }
 
 async function loadProfiles(keepSelection = true) {
   const params = new URLSearchParams();
+  params.set('promotion', $('#promotionFilter').value || 'eligible');
   if ($('#stratumFilter').value) params.set('stratum', $('#stratumFilter').value);
   if ($('#statusFilter').value) params.set('status', $('#statusFilter').value);
-  const payload = await api(`/api/profiles?${params}`);
+  const payload = await api(`/api/profiles?${params.toString()}`);
   state.profiles = payload.items || [];
   renderProfileList();
-  if (!keepSelection && state.profiles.length) await selectProfile(state.profiles[0].sales_profile_id);
+
+  const currentId = keepSelection ? state.current?.sales_profile_id : '';
+  const target = state.profiles.find(item => item.sales_profile_id === currentId) || state.profiles[0];
+  if (target) {
+    if (!state.current || state.current.sales_profile_id !== target.sales_profile_id || !keepSelection) {
+      await selectProfile(target.sales_profile_id);
+    }
+  } else {
+    state.current = null;
+    $('#detailContent').classList.add('hidden');
+    $('#detailEmpty').classList.remove('hidden');
+  }
 }
 
 function renderProfileList() {
   const list = $('#sampleList');
   list.replaceChildren();
+  setText('#listCount', `${state.profiles.length} 人`);
   if (!state.profiles.length) {
-    list.append(element('div', 'loading', '当前筛选下没有样本')); return;
+    list.append(element('div', 'loading', '当前筛选下没有客户'));
+    return;
   }
   state.profiles.forEach((profile, index) => {
-    const button = element('button', 'sample-row');
+    const promotionState = profile.promotion_state || (profile.promotion_eligible ? 'eligible' : 'excluded');
+    const button = element('button', `sample-row ${promotionState}`);
     button.type = 'button';
     button.dataset.id = profile.sales_profile_id;
     if (state.current?.sales_profile_id === profile.sales_profile_id) button.classList.add('selected');
-    const number = element('span', 'sample-number', String(index + 1).padStart(2, '0'));
+
+    const scoreCopy = promotionState === 'eligible' ? profile.priority_score : (promotionState === 'review' ? '待' : '—');
+    const score = element('span', 'sample-score', scoreCopy);
+    score.title = promotionState === 'eligible'
+      ? `促单优先分 ${profile.priority_score}`
+      : (promotionState === 'review' ? '售后事实待确认' : '已排除促销');
     const copy = element('span', 'sample-copy');
-    copy.append(element('b', '', profile.label), element('small', '', stratumLabels[profile.stratum] || '客户画像'));
-    const status = profile.review_count ? verdictLabels[profile.latest_verdict] || '已审核' : '待审核';
-    button.append(number, copy, element('em', profile.review_count ? `status ${profile.latest_verdict}` : 'status', status));
+    const stateLabel = promotionState === 'eligible'
+      ? profile.priority_label
+      : (promotionState === 'review' ? '售后待确认' : '仅服务、不促销');
+    copy.append(
+      element('b', '', profile.label),
+      element('small', '', `${profile.phone_hint} · ${stateLabel}`),
+    );
+    const statusCopy = profile.review_count ? (verdictLabels[profile.latest_verdict] || '已验收') : '待验收';
+    const status = element('em', profile.review_count ? `status ${profile.latest_verdict}` : 'status', statusCopy);
+    button.append(score, copy, status);
+    button.setAttribute('aria-label', `${index + 1}，${profile.label}，${statusCopy}`);
     button.addEventListener('click', () => selectProfile(profile.sales_profile_id));
     list.append(button);
   });
@@ -216,84 +560,178 @@ async function selectProfile(id) {
   try {
     const detail = await api(`/api/profiles/${encodeURIComponent(id)}`);
     state.current = detail;
+    state.ordersExpanded = false;
     renderDetail(detail);
     renderProfileList();
   } catch (error) {
-    $('#saveStatus').textContent = error.message;
+    setText('#saveStatus', error.message);
   } finally {
     $('#detailContent').classList.remove('loading-state');
   }
 }
 
 function renderDetail(detail) {
+  const customer = detail.customer || {};
+  const business = detail.business || {};
   const card = detail.card || {};
-  $('#sampleStratum').textContent = stratumLabels[detail.stratum] || '客户画像';
-  $('#sampleTitle').textContent = detail.label;
-  $('#sampleMeta').textContent = `历史快照截至 ${formatDate(detail.as_of_at)} · ${detail.model} · 默认满库存`;
-  renderValue($('#customerValue'), card.customer_value);
-  renderValue($('#timeRhythm'), card.time_rhythm);
-  renderValue($('#currentOpportunity'), card.current_opportunity);
-  renderValue($('#naturalOpening'), card.natural_opening);
-  renderValue($('#productPreferences'), card.product_preferences);
-  renderValue($('#purchaseDrivers'), card.purchase_drivers);
-  renderValue($('#historicalCommitments'), card.historical_commitments);
-  renderValue($('#contactReason'), card.contact_reason);
-  renderValue($('#risks'), card.risks);
-  renderValue($('#unknowns'), card.unknowns);
-  renderFacts(detail.facts || {});
+  resetMessages();
+
+  setText('#sampleStratum', stratumLabels[detail.stratum] || '客户画像');
+  setText('#sampleTitle', customer.name || detail.label || '客户');
+  setText('#sampleMeta', `历史数据截至 ${formatDate(detail.as_of_at)} · 默认满库存`);
+  setText('#headerPriority', business.priority_label);
+  $('#headerPriority').classList.remove('review', 'excluded');
+  if (business.promotion_state !== 'eligible') $('#headerPriority').classList.add(business.promotion_state);
+
+  const banner = $('#promotionBanner');
+  banner.classList.remove('hidden', 'eligible', 'review', 'excluded');
+  if (business.promotion_state === 'eligible') {
+    banner.classList.add('eligible');
+    banner.textContent = `可进入促销列表 · ${business.priority_label}，列表已按优先分从高到低排列`;
+  } else if (business.promotion_state === 'review') {
+    banner.classList.add('review');
+    banner.textContent = `暂不进入促销 · ${business.exclusion_reason || '售后事实待确认'}`;
+  } else {
+    banner.classList.add('excluded');
+    banner.textContent = `已排除促销 · ${business.exclusion_reason || '当前更适合服务，不适合促销'}`;
+  }
+
+  setText('#customerName', customer.name);
+  setText('#customerPhone', customer.phone);
+  setText('#memberShop', customer.member_shop);
+  setText('#lastOrderChannel', customer.last_order_channel);
+  setText('#priorityScore', business.promotion_state === 'eligible' ? business.priority_score : (business.promotion_state === 'review' ? '待确认' : '不促销'));
+  $('#priorityScore').classList.toggle('textual', business.promotion_state !== 'eligible');
+  setText('#priorityLabel', business.priority_label);
+  setText('#scoreFactors', (business.score_factors || []).map(humanize).join(' · '));
+  setText('#averageOrder', money(business.average_paid_amount_yuan));
+  setText('#orderCount', `${business.paid_order_count ?? 0} 条`);
+  setText('#repeatCount', `${business.repeat_count ?? 0} 次复购`);
+  setText('#totalSpend', money(business.historical_spend_yuan));
+  setText('#lastOrderDate', business.last_order_date ? `最近付款 ${business.last_order_date}` : '最近付款日期待补全');
+  setText('#aftersalesSummary', business.aftersales_summary);
+  setText('#cancelledCount', business.cancelled_count ? `${business.cancelled_count} 条取消订单，不计消费与售后` : '取消订单 0 条');
+  setText('#contactHabit', business.contact_habit);
+  setText('#orderHabit', business.order_habit);
+  setText('#repurchaseCycle', business.median_repurchase_interval_days === null || business.median_repurchase_interval_days === undefined
+    ? '复购周期证据不足'
+    : `约 ${business.median_repurchase_interval_days} 天`);
+
+  renderNarrative($('#currentOpportunity'), card.current_opportunity, '暂未发现明确的当前机会');
+  renderNarrative($('#naturalOpening'), card.natural_opening, '暂无可审核的建议开场');
+  renderOpeningCaution(card.natural_opening);
+  renderCrossSell(detail.cross_sell || {});
+  renderNarrative($('#productPreferences'), {
+    preferred_products: detail.facts?.preferred_products || [],
+    preferred_colors: detail.facts?.preferred_colors || [],
+    preferred_sizes: detail.facts?.preferred_sizes || [],
+  });
+  renderNarrative($('#purchaseDrivers'), card.purchase_drivers);
+  renderNarrative($('#historicalCommitments'), card.historical_commitments);
+  renderNarrative($('#contactReason'), card.contact_reason);
+  renderNarrative($('#risks'), card.risks, '暂未发现明确风险');
+  renderNarrative($('#unknowns'), card.unknowns, '暂无其他待确认项');
+
+  renderOrders(detail.order_history || [], business);
+  renderFacts(detail.facts || {}, business);
   renderEvidence(detail.events || []);
   renderHistory(detail.reviews || []);
   fillOwnReview(detail);
 }
 
-function renderFacts(facts) {
+function renderOrders(orders, business) {
+  const body = $('#orderTableBody');
+  body.replaceChildren();
+  const visible = state.ordersExpanded ? orders : orders.slice(0, 8);
+  if (!visible.length) {
+    const row = element('tr');
+    const cell = element('td', 'table-empty', '没有可展示的历史付款记录');
+    cell.colSpan = 6;
+    row.append(cell);
+    body.append(row);
+  }
+  visible.forEach(order => {
+    const row = element('tr');
+    row.append(
+      element('td', '', order.paid_on || '日期待补全'),
+      element('td', 'product-cell', humanize(order.product) || '商品待补全'),
+      element('td', '', order.channel || '渠道待补全'),
+      element('td', 'money-cell', money(order.amount_yuan)),
+      element('td', '', humanize(order.status) || '已付款'),
+      element('td', order.status === '有售后' ? 'aftersales-cell' : '', humanize(order.aftersales) || '无售后'),
+    );
+    body.append(row);
+  });
+  const rate = business.aftersales_rate_percent;
+  const rateCopy = rate === null || rate === undefined ? '售后比例待确认' : `售后率 ${rate}%`;
+  const cancelCopy = business.cancelled_count ? ` · 另有 ${business.cancelled_count} 条取消订单` : '';
+  setText('#orderSummary', `${business.paid_order_count ?? 0} 条有效付款记录${cancelCopy} · ${money(business.historical_spend_yuan)} · ${rateCopy}`);
+  const toggle = $('#toggleOrders');
+  toggle.classList.toggle('hidden', orders.length <= 8);
+  toggle.textContent = state.ordersExpanded ? '收起订单' : `展开全部 ${orders.length} 条订单`;
+}
+
+function renderFacts(facts, business) {
   const container = $('#factSummary');
   container.replaceChildren();
   const entries = [
-    ['价值等级', facts.value_level], ['历史有效订单', facts.historical_orders],
-    ['历史消费', facts.historical_spend_yuan === null ? null : `¥${facts.historical_spend_yuan}`],
-    ['距上次下单', facts.days_since_last_order === null ? null : `${facts.days_since_last_order} 天`],
-    ['建议联系时间', facts.recommended_contact_window], ['回复延迟中位数', facts.median_reply_seconds === null ? null : `${facts.median_reply_seconds} 秒`],
-    ['偏好商品', facts.preferred_products], ['偏好颜色', facts.preferred_colors],
-    ['偏好尺码', facts.preferred_sizes], ['会员资料', facts.member_profile_matched ? '已匹配' : '未匹配'],
-    ['库存口径', facts.inventory_assumption],
+    ['历史消费', money(facts.historical_spend_yuan)],
+    ['客单均额', money(facts.average_paid_amount_yuan)],
+    ['有效付款记录', `${facts.historical_orders ?? 0} 条`],
+    ['距上次付款', facts.days_since_last_order === null || facts.days_since_last_order === undefined ? '待补全' : `${facts.days_since_last_order} 天`],
+    ['微信联系习惯', facts.contact_habit],
+    ['历史下单时段', facts.order_habit],
+    ['偏好商品', (facts.preferred_products || []).join('、') || '待确认'],
+    ['偏好颜色', (facts.preferred_colors || []).join('、') || '待确认'],
+    ['偏好尺码', (facts.preferred_sizes || []).join('、') || '待确认'],
+    ['促销资格', business.promotion_state === 'eligible' ? '可进入促销列表' : (business.promotion_state === 'review' ? '售后待确认' : '仅服务、不促销')],
   ];
-  entries.forEach(([name, value]) => {
+  entries.forEach(([label, value]) => {
     const item = element('div');
-    item.append(element('span', '', name), element('b', '', compact(value)));
+    item.append(element('span', '', label), element('b', '', humanize(value) || '待确认'));
     container.append(item);
   });
 }
 
 function renderEvidence(events) {
-  const list = $('#evidenceList');
-  list.replaceChildren();
-  const evidenceTotal = events.reduce((total, event) => total + (event.evidence?.length || 0), 0);
-  $('#evidenceCount').textContent = `${events.length} 个事件 · ${evidenceTotal} 条引用`;
+  const container = $('#evidenceList');
+  container.replaceChildren();
+  let evidenceCount = 0;
+  if (!events.length) container.append(element('p', 'empty-copy', '暂无可展示的业务依据'));
   events.forEach(event => {
-    const article = element('article', 'evidence-item');
-    const head = element('div');
-    head.append(element('b', '', eventLabels[event.event_type] || event.event_type), element('span', '', event.confidence ? `${Math.round(event.confidence * 100)}%` : ''));
-    article.append(head, element('p', '', event.summary || '已验证销售事件'));
-    (event.evidence || []).forEach(item => {
-      const quote = element('blockquote');
-      quote.append(element('small', '', item.label), document.createTextNode(item.quote));
-      article.append(quote);
-    });
-    list.append(article);
+    const item = element('article', 'evidence-item');
+    item.append(element('h4', '', event.label || '销售线索'));
+    if (event.summary) item.append(element('p', '', humanize(event.summary)));
+    const evidence = Array.isArray(event.evidence) ? event.evidence : [];
+    evidenceCount += evidence.length;
+    if (evidence.length) {
+      const list = element('ul');
+      evidence.forEach(entry => list.append(element('li', '', `${entry.label}：${humanize(entry.quote)}`)));
+      item.append(list);
+    }
+    container.append(item);
   });
+  setText('#evidenceCount', `${evidenceCount} 条`);
 }
 
 function renderHistory(reviews) {
   const container = $('#reviewHistory');
   container.replaceChildren();
-  if (!reviews.length) return;
-  container.append(element('h4', '', '已有验收记录'));
-  reviews.forEach(review => {
-    const item = element('article');
-    item.append(element('b', '', `${review.reviewer} · ${verdictLabels[review.verdict] || review.verdict}`));
-    item.append(element('small', '', `${Object.values(review.scores).join(' / ')} · ${formatDate(review.updated_at)}`));
-    if (review.notes) item.append(element('p', '', review.notes));
+  if (!reviews.length) {
+    container.append(element('p', 'empty-copy', '还没有开场验收记录'));
+    return;
+  }
+  container.append(element('h4', '', '最近验收记录'));
+  reviews.slice(0, 5).forEach(review => {
+    const item = element('article', `history-item ${review.verdict || ''}`);
+    const head = element('div');
+    head.append(
+      element('b', '', verdictLabels[review.verdict] || '已验收'),
+      element('time', '', formatDate(review.updated_at, true)),
+    );
+    item.append(head);
+    if (review.suggested_opening) item.append(element('p', '', review.suggested_opening));
+    if (review.revision_notes) item.append(element('p', 'revision-history-copy', `其他修改：${review.revision_notes}`));
     container.append(item);
   });
 }
@@ -301,69 +739,99 @@ function renderHistory(reviews) {
 async function saveReview(event) {
   event.preventDefault();
   if (!state.current) return;
-  const reviewer = $('#reviewer').value.trim();
   const verdict = document.querySelector('[name="verdict"]:checked')?.value || '';
-  if (!reviewer || scoreDefinitions.some(([name]) => !state.scores[name]) || !verdict) {
-    $('#saveStatus').textContent = '请填写称呼、五项评分和总体结论'; return;
+  if (!verdict) {
+    setText('#saveStatus', '请先选择总体结论');
+    return;
   }
-  const corrections = {};
-  if ($('#openingCorrection').value.trim()) corrections.natural_opening = $('#openingCorrection').value.trim();
-  if ($('#factCorrection').value.trim()) corrections.fact_correction = $('#factCorrection').value.trim();
-  if (verdict === 'edited' && !Object.keys(corrections).length) {
-    $('#saveStatus').textContent = '选择“改完可以用”时，请填写具体修改建议'; return;
+  const suggestedOpening = $('#suggestedOpening').value.trim();
+  const priorityAssessment = document.querySelector('[name="priority_assessment"]:checked')?.value || '';
+  const priorityReasonCode = $('#priorityReasonCode').value;
+  if (['too_high', 'too_low', 'not_suitable'].includes(priorityAssessment) && !priorityReasonCode) {
+    setText('#saveStatus', '请为优先级调整选择一个主要原因');
+    return;
   }
-  if (verdict === 'rejected' && !$('#reviewNotes').value.trim()) {
-    $('#saveStatus').textContent = '选择“不建议使用”时，请写明具体原因'; return;
+  if (['edited', 'rejected'].includes(verdict) && !suggestedOpening) {
+    showOpeningEditor();
+    setText('#saveStatus', '请写一版更合适的开场');
+    return;
   }
+
   const button = $('#saveReview');
   button.disabled = true;
-  $('#saveStatus').textContent = '正在保存…';
+  setText('#saveStatus', '正在保存…');
   try {
     await api(`/api/profiles/${encodeURIComponent(state.current.sales_profile_id)}/review`, {
       method: 'POST',
       body: JSON.stringify({
-        card_version: state.current.card_version, verdict, scores: state.scores, corrections,
-        notes: $('#reviewNotes').value.trim(), reviewer,
+        card_version: state.current.card_version,
+        verdict,
+        suggested_opening: suggestedOpening,
+        revision_notes: $('#revisionNotes').value.trim(),
+        priority_assessment: priorityAssessment,
+        priority_reason_code: priorityReasonCode,
+        priority_note: $('#priorityNote').value.trim(),
+        evidence_message_ref: state.selectedEvidenceRef,
       }),
     });
-    localStorage.setItem('reviewerName', reviewer);
-    $('#saveStatus').textContent = '已保存，可以继续下一张';
+    setText('#saveStatus', '已保存，可继续验收下一位');
     await Promise.all([loadSummary(), loadProfiles(true)]);
     await selectProfile(state.current.sales_profile_id);
+    setText('#saveStatus', '已保存，可继续验收下一位');
   } catch (error) {
-    $('#saveStatus').textContent = error.status === 409 ? '卡片已更新，请刷新后重新审核' : error.message;
+    setText('#saveStatus', error.message);
   } finally {
     button.disabled = false;
   }
 }
 
 async function nextUnreviewed() {
-  const currentIndex = state.profiles.findIndex(item => item.sales_profile_id === state.current?.sales_profile_id);
+  if (!state.profiles.length) return;
+  const currentIndex = Math.max(0, state.profiles.findIndex(item => item.sales_profile_id === state.current?.sales_profile_id));
   const ordered = [...state.profiles.slice(currentIndex + 1), ...state.profiles.slice(0, currentIndex + 1)];
-  const next = ordered.find(item => !item.review_count) || ordered[0];
+  const next = ordered.find(item => !item.review_count && item.sales_profile_id !== state.current?.sales_profile_id);
   if (next) await selectProfile(next.sales_profile_id);
+  else setText('#saveStatus', '当前列表已全部验收');
 }
 
-async function boot() {
-  renderScoreFields();
-  $('#reviewer').value = localStorage.getItem('reviewerName') || '';
-  $('#loginForm').addEventListener('submit', login);
+function boot() {
   $('#reviewForm').addEventListener('submit', saveReview);
+  $('#promotionFilter').addEventListener('change', () => loadProfiles(false));
   $('#stratumFilter').addEventListener('change', () => loadProfiles(false));
   $('#statusFilter').addEventListener('change', () => loadProfiles(false));
   $('#nextUnreviewed').addEventListener('click', nextUnreviewed);
-  $('#reviewer').addEventListener('change', () => state.current && fillOwnReview(state.current));
-  const saved = sessionStorage.getItem('reviewAccessCode') || '';
-  if (saved) {
-    $('#accessCode').value = saved;
-    state.token = saved;
-    try {
-      await api('/api/summary');
-      $('#loginGate').classList.add('hidden');
-      $('#portal').classList.remove('hidden');
-      await refreshAll();
-    } catch (_) { state.token = ''; }
-  }
+  $('#editOpening').addEventListener('click', () => showOpeningEditor());
+  $('#chatPanel').addEventListener('toggle', () => {
+    if ($('#chatPanel').open && !state.messagesLoaded && !state.messagesLoading) loadMessages();
+  });
+  $('#loadEarlierMessages').addEventListener('click', () => {
+    if (state.messagesNextCursor) loadMessages({ before: state.messagesNextCursor });
+  });
+  $('#retryMessages').addEventListener('click', () => loadMessages());
+  document.querySelectorAll('[name="priority_assessment"]').forEach(input => {
+    input.addEventListener('change', () => syncPriorityReasonFields({ clear: true }));
+  });
+  $('#priorityNote').addEventListener('input', () => {
+    setText('#priorityNoteCount', String($('#priorityNote').value.length));
+  });
+  $('#revisionNotes').addEventListener('input', () => {
+    setText('#revisionNotesCount', String($('#revisionNotes').value.length));
+  });
+  $('#toggleOrders').addEventListener('click', () => {
+    state.ordersExpanded = !state.ordersExpanded;
+    renderOrders(state.current?.order_history || [], state.current?.business || {});
+  });
+  document.querySelectorAll('[name="verdict"]').forEach(input => {
+    input.addEventListener('change', () => {
+      if (['edited', 'rejected'].includes(input.value)) showOpeningEditor();
+      else {
+        $('#suggestedOpening').value = '';
+        $('#openingEditor').classList.add('hidden');
+      }
+    });
+  });
+
+  refreshAll().catch(error => setText('#runMeta', `数据读取失败：${error.message}`));
 }
 
 document.addEventListener('DOMContentLoaded', boot);
