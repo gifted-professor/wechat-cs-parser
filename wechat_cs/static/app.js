@@ -4,6 +4,9 @@ const isDashboard = location.pathname === '/wechat-cs' || location.pathname.star
 const apiRoot = isDashboard ? '/api/wechat-cs' : '/v1';
 const state = {
   health: null,
+  actionQueue: null,
+  currentAction: null,
+  currentActionEdited: false,
   customers: [],
   aftersales: [],
   currentCustomer: null,
@@ -14,6 +17,7 @@ const state = {
 };
 
 const viewMeta = {
+  actions: ['今日客服行动队列', '今天先联系谁'],
   opportunities: ['今日优先', '客户机会'],
   aftersales: ['需要处理', '售后待办'],
   customer: ['客户上下文', '客户详情'],
@@ -43,6 +47,7 @@ function errorMessage(payload, fallback = '请求失败，请稍后重试') {
 async function api(path, options = {}) {
   const headers = { Accept: 'application/json', ...(options.headers || {}) };
   const storedToken = token();
+  if (storedToken && isDashboard) headers['X-WeChat-CS-Dashboard-Token'] = storedToken;
   if (storedToken && !isDashboard) headers.Authorization = `Bearer ${storedToken}`;
   if (options.body && typeof options.body !== 'string') {
     headers['Content-Type'] = 'application/json';
@@ -119,8 +124,542 @@ function switchView(name) {
   $('#pageEyebrow').textContent = viewMeta[name][0];
   $('#pageTitle').textContent = viewMeta[name][1];
   clearNotice();
+  if (name === 'actions' && !state.actionQueue) void loadActionQueue();
   if (name === 'draft') syncDraftCustomer();
   if (name === 'samples') void loadReviewQueues();
+}
+
+const laneMeta = {
+  reply_now: { label: '立即回复', className: 'reply', list: '#replyNowList' },
+  proactive_today: { label: '今日跟进', className: 'proactive', list: '#proactiveList' },
+  suppressed: { label: '暂不联系', className: 'suppressed', list: '#suppressedList' },
+};
+
+const reasonLabels = {
+  action_queue_unavailable: '行动队列服务不可用',
+  empty_queue_status_unknown: '无法确认空队列的数据状态',
+  collector_stopped: '聊天采集已停止',
+  collector_unhealthy: '聊天采集状态异常',
+  message_collection_unhealthy: '聊天采集状态异常',
+  message_snapshot_stale: '消息快照超过 15 分钟',
+  stale_message_snapshot: '消息快照超过 15 分钟',
+  message_snapshot_missing: '缺少消息快照',
+  order_snapshot_stale: '订单快照超过 24 小时',
+  stale_order_snapshot: '订单快照超过 24 小时',
+  recent_order: '客户刚下单，避免重复打扰',
+  recently_ordered: '客户刚下单，避免重复打扰',
+  aftersales_risk: '存在售后或争议，应先修复体验',
+  aftersales_open: '存在未解决售后，应先修复体验',
+  explicit_refusal: '客户已明确拒绝',
+  explicit_rejection: '客户已明确拒绝',
+  repeated_no_response: '连续联系后未回复',
+  consecutive_no_reply: '连续联系后未回复',
+  contact_cooldown: '仍在 7 天联系冷却期',
+  proactive_cooldown: '仍在 7 天联系冷却期',
+  identity_conflict: '客户身份存在冲突',
+  insufficient_facts: '事实不足，暂不能给出建议',
+  facts_insufficient: '事实不足，暂不能给出建议',
+  required_facts_missing: '联系前所需事实尚未核实',
+  phone_identity_missing: '尚未完成人工身份绑定',
+  duplicate_phone_day: '同一客户今天已有行动',
+  duplicate_phone_today: '同一客户今天已有行动',
+  proactive_daily_limit: '已达到今日主动联系上限',
+  daily_proactive_limit: '已达到今日主动联系上限',
+  order_snapshot_stale_for_proactive: '订单快照过期，暂停主动跟进',
+  not_actionable_today: '今天没有足够的联系理由',
+  unresolved_inbound: '有未回复的客户消息',
+  unanswered_inbound: '有未回复的客户消息',
+  promised_followup: '已到约定跟进时间',
+  repurchase_window: '进入历史复购窗口',
+  repurchase_signal: '进入历史复购窗口',
+  high_customer_value: '历史价值较高',
+  customer_value_signal: '历史价值较高',
+  active_intent: '近期意向较明确',
+  positive_intent: '近期表达了积极意向',
+  mixed_intent: '近期意向混合，需轻量确认',
+  product_candidate_signal: '存在历史商品偏好候选',
+  proactive_eligible: '进入人工跟进窗口',
+  historical_snapshot_only: '基于历史快照，不代表实时状态',
+  contact_precheck_required: '联系前必须人工核对最新状态',
+};
+
+const actionLabels = {
+  reply_to_inbound: '回复客户当前问题',
+  proactive_followup: '轻量跟进此前需求',
+  follow_up_promise: '按约定时间回访',
+  follow_up_as_promised: '按约定时间回访',
+  restore_message_collection: '先恢复聊天采集',
+  refresh_message_snapshot: '先刷新消息快照',
+  resolve_identity: '先人工核对客户身份',
+  route_to_human_aftersales: '先人工处理售后',
+  verify_facts: '先核对动态事实',
+  human_review: '交由人工判断',
+  suppress_contact: '暂不联系',
+  do_not_contact: '暂不联系',
+};
+
+const factLabels = {
+  current_price: '当前价格',
+  inventory: '实时库存',
+  size_availability: '尺码可用情况',
+  discount: '优惠',
+  promotion: '活动',
+  delivery_estimate: '发货或到货时效',
+  order_status: '订单状态',
+  aftersales_policy: '售后政策',
+  policy: '当前政策',
+  unverified_price: '不得承诺未经核实的价格',
+  unverified_inventory: '不得承诺未经核实的库存',
+  unverified_size: '不得承诺未经核实的尺码',
+  unverified_discount: '不得承诺未经核实的优惠',
+  unverified_policy: '不得承诺未经核实的政策',
+  guaranteed_delivery: '不得保证发货或到货时效',
+  guaranteed_outcome: '不得保证成交、退款或售后结果',
+};
+
+function readableCode(value, dictionary = {}) {
+  const code = typeof value === 'string' ? value : value?.code || value?.reason || value?.label || '';
+  if (!code) return '';
+  return dictionary[code] || String(code).replaceAll('_', ' ');
+}
+
+function listValues(value) {
+  return Array.isArray(value) ? value : [];
+}
+
+function shanghaiDateValue(date = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
+  }).formatToParts(date);
+  const fields = Object.fromEntries(parts.map(part => [part.type, part.value]));
+  return `${fields.year}-${fields.month}-${fields.day}`;
+}
+
+function formatPercent(value) {
+  if (typeof value === 'string' && ['high', 'medium', 'low'].includes(value)) {
+    return ({ high: '高', medium: '中', low: '低' })[value];
+  }
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return '待人工判断';
+  return `${Math.round((numeric <= 1 ? numeric * 100 : numeric))}%`;
+}
+
+function formatContactWindow(windowValue) {
+  if (typeof windowValue === 'string' && windowValue.trim()) return windowValue.trim();
+  if (!windowValue || typeof windowValue !== 'object') return '工作时段人工选择';
+  if (windowValue.label) return String(windowValue.label);
+  if (windowValue.mode === 'none') return '暂停联系';
+  if (windowValue.mode === 'as_soon_as_possible') return '尽快人工处理';
+  if (windowValue.mode === 'work_hours_manual_choice') return '工作时段人工选择';
+  if (windowValue.start_hour !== undefined && windowValue.end_hour !== undefined) {
+    const range = `${String(windowValue.start_hour).padStart(2, '0')}:00–${String(windowValue.end_hour).padStart(2, '0')}:00`;
+    return windowValue.mode === 'personal_history' ? `历史活跃时段 ${range}` : range;
+  }
+  if (windowValue.start && windowValue.end) return `${windowValue.start}–${windowValue.end}`;
+  if (windowValue.window) return String(windowValue.window);
+  return '工作时段人工选择';
+}
+
+function actionDisplayName(item) {
+  return String(item?.display_name || '匿名客户');
+}
+
+function queueIsBlocked() {
+  return state.actionQueue?.status === 'blocked';
+}
+
+function normalizeQueue(payload) {
+  const lanes = payload?.lanes || {};
+  const normalizedLanes = {
+    reply_now: listValues(lanes.reply_now),
+    proactive_today: listValues(lanes.proactive_today),
+    suppressed: listValues(lanes.suppressed),
+  };
+  const allItems = Object.values(normalizedLanes).flat();
+  const inferredFreshness = allItems.find(item => item?.freshness)?.freshness || {};
+  const hardBlockCodes = new Set(['message_collection_unhealthy', 'message_snapshot_stale']);
+  const inferredBlockReasons = [...new Set(normalizedLanes.suppressed.flatMap(item => listValues(item.reason_codes)).filter(code => hardBlockCodes.has(code)))];
+  const explicitStatus = payload?.status || payload?.queue_status;
+  let status = explicitStatus || 'ready';
+  if (!explicitStatus && inferredBlockReasons.length && !normalizedLanes.reply_now.length && !normalizedLanes.proactive_today.length) {
+    status = 'blocked';
+  } else if (!explicitStatus && !allItems.length) {
+    status = 'blocked';
+    inferredBlockReasons.push('empty_queue_status_unknown');
+  } else if (!explicitStatus && inferredFreshness?.orders?.state !== 'fresh') {
+    status = 'degraded_order_data';
+  }
+  return {
+    profile_id: payload?.profile_id || payload?.profile || $('#actionProfile').value,
+    queue_date: payload?.queue_date || payload?.date || $('#actionDate').value,
+    status,
+    block_reasons: listValues(payload?.block_reasons).length ? listValues(payload?.block_reasons) : inferredBlockReasons,
+    lane_restrictions: payload?.lane_restrictions && typeof payload.lane_restrictions === 'object' ? payload.lane_restrictions : {},
+    freshness: payload?.freshness && typeof payload.freshness === 'object' ? payload.freshness : inferredFreshness,
+    data_mode: payload?.data_mode || (status === 'historical_snapshot_ready' ? 'historical_snapshot' : 'current_snapshot'),
+    snapshot_cutoff: payload?.snapshot_cutoff || payload?.freshness?.messages?.snapshot_at || null,
+    realtime_reply_available: payload?.realtime_reply_available === true,
+    contact_precheck_required: payload?.contact_precheck_required === true,
+    counts: payload?.counts || {},
+    lanes: normalizedLanes,
+  };
+}
+
+function setActionListsLoading(text = '正在读取今日行动…') {
+  Object.values(laneMeta).forEach(meta => setLoading($(meta.list), text));
+}
+
+function renderQueueStatus(queue) {
+  const counts = {
+    reply_now: Number(queue.counts?.reply_now ?? queue.lanes.reply_now.length),
+    proactive_today: Number(queue.counts?.proactive_today ?? queue.lanes.proactive_today.length),
+    suppressed: Number(queue.counts?.suppressed ?? queue.lanes.suppressed.length),
+  };
+  $('#replyNowCount').textContent = counts.reply_now;
+  $('#proactiveCount').textContent = counts.proactive_today;
+  $('#suppressedCount').textContent = counts.suppressed;
+  $('#replyNowBadge').textContent = counts.reply_now;
+  $('#proactiveBadge').textContent = counts.proactive_today;
+  $('#suppressedBadge').textContent = counts.suppressed;
+  $('#navActionCount').textContent = counts.reply_now + counts.proactive_today;
+
+  const freshness = queue.freshness || {};
+  const messageState = freshness.messages?.state;
+  const orderState = freshness.orders?.state;
+  const freshnessLabel = freshness.label
+    || (queue.status === 'blocked'
+      ? '不可用于行动'
+      : queue.status === 'historical_snapshot_ready'
+        ? '历史快照促单候选；实时回复已关闭'
+      : orderState && orderState !== 'fresh'
+        ? '消息可用；价值与商品建议已隐藏'
+        : messageState === 'fresh' ? '消息与订单快照可用' : '可用于人工判断');
+  $('#queueFreshness').textContent = freshnessLabel;
+  const snapshotCutoff = queue.snapshot_cutoff || freshness.messages?.snapshot_at || freshness.as_of_at || freshness.message_snapshot_at;
+  $('#queueGeneratedAt').textContent = snapshotCutoff
+    ? `数据截至 ${formatDate(snapshotCutoff)}`
+    : `队列日期 ${queue.queue_date}`;
+  $('#queueOverview').classList.toggle('is-blocked', queue.status === 'blocked');
+
+  const blocked = $('#queueBlocked');
+  blocked.classList.toggle('hidden', queue.status !== 'blocked');
+  const reasons = $('#queueBlockReasons');
+  reasons.replaceChildren();
+  if (queue.status === 'blocked') {
+    const values = queue.block_reasons.length ? queue.block_reasons : ['collector_unhealthy'];
+    values.forEach(value => reasons.append(node('span', '', readableCode(value, reasonLabels))));
+    $('#queueBlockedSummary').textContent = '当前数据不能支持真实联系建议，所有候选已自动移入“暂不联系”。';
+  }
+}
+
+function makeActionCard(item) {
+  const button = node('button', `action-card action-${laneMeta[item.lane]?.className || 'suppressed'}`);
+  button.type = 'button';
+  button.dataset.actionId = item.action_id || '';
+  const head = node('span', 'action-card-head');
+  const identity = node('span', 'action-identity');
+  const avatar = node('span', 'avatar small', actionDisplayName(item).slice(0, 1));
+  const identityCopy = node('span');
+  identityCopy.append(node('strong', '', actionDisplayName(item)));
+  const privateMeta = [item.owner, item.account_label, item.contact_hint].filter(Boolean).join(' · ');
+  identityCopy.append(node('small', '', privateMeta || '本地匿名客户'));
+  identity.append(avatar, identityCopy);
+  const priority = node('span', 'action-priority');
+  priority.append(node('b', '', item.priority_score ?? '—'), node('small', '', '优先分'));
+  head.append(identity, priority);
+
+  const why = listValues(item.reason_codes).map(value => readableCode(value, reasonLabels)).filter(Boolean)[0];
+  const body = node('span', 'action-card-body');
+  body.append(node('span', 'action-window', '',));
+  body.querySelector('.action-window').append(node('small', '', item.lane === 'suppressed' ? '暂停原因' : '建议时间'), node('strong', '', item.lane === 'suppressed' ? (why || '规则暂停') : formatContactWindow(item.contact_window)));
+  body.append(node('span', 'action-reason', why || readableCode(item.recommended_action, actionLabels) || '等待人工判断'));
+  const footer = node('span', 'action-card-footer');
+  footer.append(node('span', `lane-chip ${laneMeta[item.lane]?.className || 'suppressed'}`, laneMeta[item.lane]?.label || '待处理'));
+  if (item.contact_precheck_required) footer.append(node('span', 'muted-tag', '历史快照 · 联系前复核'));
+  footer.append(node('span', 'detail-link', '查看详情 →'));
+  button.append(head, body, footer);
+  button.addEventListener('click', () => void selectAction(item));
+  return button;
+}
+
+function renderActionLane(lane, items) {
+  const container = $(laneMeta[lane].list);
+  container.replaceChildren();
+  if (!items.length) {
+    const empty = lane === 'suppressed' ? '没有被安全规则暂停的客户。' : '当前没有需要处理的客户。';
+    setEmpty(container, empty);
+    return;
+  }
+  items.forEach(item => container.append(makeActionCard({ ...item, lane: item.lane || lane })));
+}
+
+function renderActionQueue(queue) {
+  renderQueueStatus(queue);
+  Object.keys(laneMeta).forEach(lane => renderActionLane(lane, queue.lanes[lane]));
+  $('#actionDetailEmpty').classList.remove('hidden');
+  $('#actionDetailContent').classList.add('hidden');
+  state.currentAction = null;
+}
+
+function renderActionQueueFailure(error) {
+  const queue = normalizeQueue({
+    status: 'blocked',
+    block_reasons: [error?.payload?.error?.code || 'action_queue_unavailable'],
+    lanes: { reply_now: [], proactive_today: [], suppressed: [] },
+    freshness: { label: '行动队列不可用' },
+  });
+  state.actionQueue = queue;
+  renderActionQueue(queue);
+  $('#queueBlockedSummary').textContent = `${error.message}。系统没有生成替代建议。`;
+}
+
+async function loadActionQueue() {
+  const profile = $('#actionProfile').value || 'aolai1';
+  const date = $('#actionDate').value || shanghaiDateValue();
+  $('#actionDate').value = date;
+  setActionListsLoading();
+  try {
+    const path = `/action-queue?profile=${encodeURIComponent(profile)}&date=${encodeURIComponent(date)}&limit=20`;
+    const payload = await api(path);
+    state.actionQueue = normalizeQueue(payload);
+    renderActionQueue(state.actionQueue);
+  } catch (error) {
+    renderActionQueueFailure(error);
+  }
+}
+
+function appendDetailSection(container, title, values, className = '') {
+  const section = node('section', `detail-section ${className}`.trim());
+  section.append(node('h3', '', title));
+  const list = node('div', 'detail-tags');
+  values.filter(Boolean).forEach(value => list.append(node('span', '', value)));
+  if (!list.childElementCount) list.append(node('span', 'muted-detail', '无额外项目'));
+  section.append(list);
+  container.append(section);
+}
+
+function draftFromAction(item) {
+  const draft = item?.draft && typeof item.draft === 'object' ? item.draft : {};
+  return {
+    ...draft,
+    text: String(draft.text || draft.draft_text || item?.draft_text || ''),
+  };
+}
+
+function humanStateLabel(value) {
+  return ({ pending: '待人工确认', adopted: '已采纳', edited: '已修改采纳', rejected: '已拒绝' })[value] || '待人工确认';
+}
+
+function renderActionDetail(item) {
+  state.currentAction = item;
+  state.currentActionEdited = false;
+  $$('.action-card').forEach(card => card.classList.toggle('selected', card.dataset.actionId === String(item.action_id || '')));
+  $('#actionDetailEmpty').classList.add('hidden');
+  const content = $('#actionDetailContent');
+  content.classList.remove('hidden');
+  content.replaceChildren();
+
+  const header = node('div', 'detail-header');
+  const identity = node('div', 'detail-identity');
+  identity.append(node('span', 'avatar', actionDisplayName(item).slice(0, 1)));
+  const identityText = node('div');
+  identityText.append(node('p', 'eyebrow', laneMeta[item.lane]?.label || '行动详情'));
+  identityText.append(node('h2', '', actionDisplayName(item)));
+  const localDetails = [item.owner && `负责人 ${item.owner}`, item.account_label, item.contact_hint].filter(Boolean).join(' · ');
+  identityText.append(node('p', '', localDetails || '本地匿名映射未配置'));
+  identity.append(identityText);
+  const stateBadge = node('span', `confirmation-state state-${item.human_confirmation_state || 'pending'}`, humanStateLabel(item.human_confirmation_state));
+  header.append(identity, stateBadge);
+  content.append(header);
+
+  const scoreRow = node('div', 'detail-score-row');
+  const actionName = item.lane === 'suppressed' ? '暂不联系' : readableCode(item.recommended_action, actionLabels) || '人工判断';
+  [
+    ['建议动作', actionName],
+    ['联系时间', item.lane === 'suppressed' ? '暂停' : formatContactWindow(item.contact_window)],
+    ['优先分', item.priority_score ?? '—'],
+    ['建议置信度', formatPercent(item.confidence)],
+  ].forEach(([label, value]) => {
+    const cell = node('div');
+    cell.append(node('small', '', label), node('strong', '', value));
+    scoreRow.append(cell);
+  });
+  content.append(scoreRow);
+
+  appendDetailSection(content, '为什么排在这里', listValues(item.reason_codes).map(value => readableCode(value, reasonLabels)), 'reason-detail');
+  const required = listValues(item.required_facts).map(value => readableCode(value, factLabels));
+  const missing = listValues(item.missing_facts).map(value => `待确认：${readableCode(value, factLabels)}`);
+  if (item.contact_precheck_required) {
+    missing.unshift('联系前人工核对：新消息、刚下单、售后、拒绝联系');
+  }
+  appendDetailSection(content, '联系前要核对', [...required, ...missing], 'fact-detail');
+  appendDetailSection(content, '禁止承诺', listValues(item.prohibited_claims).map(value => readableCode(value, factLabels)), 'prohibited-detail');
+
+  const freshness = item.freshness && typeof item.freshness === 'object' ? item.freshness : state.actionQueue?.freshness || {};
+  const freshnessSection = node('section', 'detail-section freshness-detail');
+  freshnessSection.append(node('h3', '', '数据与人工状态'));
+  const freshnessCopy = node('p', '', freshness.label || (queueIsBlocked()
+    ? '当前数据不可用于行动'
+    : item.contact_precheck_required
+      ? `历史快照候选；数据截至 ${formatDate(item.snapshot_cutoff || freshness.messages?.snapshot_at)}，联系前必须人工复核最新状态`
+      : '数据通过当前规则检查'));
+  freshnessSection.append(freshnessCopy, node('small', '', `策略 ${item.strategy_version || '规则版'} · 排序 ${item.priority_version || '规则版'}`));
+  content.append(freshnessSection);
+
+  const safetyViolation = item.send_allowed !== false || item.human_confirmation_required !== true;
+  if (item.lane === 'suppressed' || queueIsBlocked() || safetyViolation) {
+    const pause = node('div', 'detail-pause');
+    pause.append(node('strong', '', safetyViolation ? '安全字段异常，已停止操作' : '这位客户当前不提供回复建议'));
+    pause.append(node('p', '', safetyViolation ? '请检查本地服务版本和安全配置。' : '先处理上面的暂停原因；数据恢复后再由人工重新判断。'));
+    content.append(pause);
+    return;
+  }
+
+  renderActionDraft(content, item, draftFromAction(item));
+}
+
+function renderActionDraft(content, item, draft) {
+  content.querySelector('.action-draft-box')?.remove();
+  const box = node('section', 'action-draft-box');
+  const head = node('div', 'action-draft-head');
+  const title = node('div');
+  title.append(node('p', 'eyebrow', draft.model_used ? 'Kimi 白名单内润色' : '规则骨架'));
+  title.append(node('h3', '', '可审核的回复建议'));
+  const generation = node('button', 'secondary-button compact-button', draft.text ? '重新生成建议' : '生成回复建议');
+  generation.type = 'button';
+  generation.addEventListener('click', () => void generateActionDraft(item, generation));
+  head.append(title, generation);
+
+  const textarea = node('textarea', 'action-draft-text');
+  textarea.rows = 8;
+  textarea.maxLength = 12000;
+  textarea.readOnly = true;
+  textarea.value = draft.text || '';
+  textarea.placeholder = '点击“生成回复建议”，系统会先使用事实白名单；失败时退回规则骨架。';
+  const requiredFacts = listValues(item.required_facts);
+  let factInputs = null;
+  if (requiredFacts.length) {
+    factInputs = node('div', 'draft-fact-inputs');
+    const factIntro = node('p', '', '如已从当前事实源逐项核实，可填写后再润色；留空时只使用规则骨架。不要填写手机号或聊天标识。');
+    factInputs.append(factIntro);
+    const grid = node('div');
+    requiredFacts.forEach(codeValue => {
+      const code = typeof codeValue === 'string' ? codeValue : codeValue?.code;
+      if (!code) return;
+      const label = node('label', '', readableCode(code, factLabels));
+      const input = node('input');
+      input.type = 'text';
+      input.maxLength = 400;
+      input.dataset.factCode = code;
+      input.placeholder = '确认后填写；未确认请留空';
+      label.append(input);
+      grid.append(label);
+    });
+    factInputs.append(grid);
+  }
+  const actions = node('div', 'action-draft-actions');
+  const copy = node('button', 'secondary-button', '复制建议');
+  const edit = node('button', 'secondary-button', '编辑建议');
+  const adopt = node('button', 'success-button', '采纳');
+  const reject = node('button', 'ghost-danger', '拒绝');
+  [copy, edit, adopt, reject].forEach(button => { button.type = 'button'; });
+  copy.disabled = !draft.text;
+  adopt.disabled = !draft.text;
+  copy.addEventListener('click', () => void copyActionDraft(textarea, box));
+  edit.addEventListener('click', () => {
+    textarea.readOnly = false;
+    textarea.classList.add('is-editing');
+    textarea.focus();
+    state.currentActionEdited = true;
+    adopt.textContent = '采纳修改';
+    setActionDraftStatus(box, '可以修改文字；采纳前仍需核对事实。');
+  });
+  adopt.addEventListener('click', () => void feedbackAction(item, state.currentActionEdited ? 'edited' : 'adopted', textarea.value, box));
+  reject.addEventListener('click', () => void feedbackAction(item, 'rejected', '', box));
+  actions.append(copy, edit, adopt, reject);
+  const status = node('p', 'action-draft-status');
+  box.append(head);
+  if (factInputs) box.append(factInputs);
+  box.append(textarea, actions, status);
+  content.append(box);
+}
+
+function setActionDraftStatus(box, message, kind = '') {
+  const status = box.querySelector('.action-draft-status');
+  status.textContent = message;
+  status.className = `action-draft-status ${kind}`.trim();
+}
+
+async function selectAction(queueItem) {
+  renderActionDetail(queueItem);
+  const content = $('#actionDetailContent');
+  content.classList.add('is-loading');
+  try {
+    const payload = await api(`/action-queue/${encodeURIComponent(queueItem.action_id)}`);
+    const detail = payload?.item && typeof payload.item === 'object' ? payload.item : payload;
+    renderActionDetail({ ...queueItem, ...detail, lane: detail.lane || queueItem.lane });
+  } catch (error) {
+    showNotice(`详情读取失败：${error.message}`, 'error');
+  } finally {
+    content.classList.remove('is-loading');
+  }
+}
+
+async function generateActionDraft(item, button) {
+  button.disabled = true;
+  button.textContent = '正在安全起草…';
+  try {
+    const facts = {};
+    button.closest('.action-draft-box')?.querySelectorAll('[data-fact-code]').forEach(input => {
+      const value = input.value.trim();
+      if (value) facts[input.dataset.factCode] = value;
+    });
+    const payload = await api(`/action-queue/${encodeURIComponent(item.action_id)}/draft`, { method: 'POST', body: { facts } });
+    const draft = payload?.draft && typeof payload.draft === 'object'
+      ? payload.draft
+      : { text: payload?.draft_text || payload?.text || '', mode: payload?.mode, model_used: payload?.model_used };
+    const merged = {
+      ...item,
+      draft,
+      human_confirmation_required: payload?.human_confirmation_required ?? item.human_confirmation_required,
+      send_allowed: payload?.send_allowed ?? item.send_allowed,
+    };
+    renderActionDetail(merged);
+  } catch (error) {
+    setActionDraftStatus(button.closest('.action-draft-box'), `${error.message}；没有生成模拟建议。`, 'error');
+  } finally {
+    button.disabled = false;
+    button.textContent = '重新生成建议';
+  }
+}
+
+async function copyActionDraft(textarea, box) {
+  if (!textarea.value.trim()) return;
+  try {
+    await navigator.clipboard.writeText(textarea.value);
+    setActionDraftStatus(box, '已复制，请人工核对后使用。', 'success');
+  } catch (error) {
+    textarea.focus();
+    textarea.select();
+    setActionDraftStatus(box, '浏览器未允许自动复制，已为你选中文字。');
+  }
+}
+
+async function feedbackAction(item, outcome, text, box) {
+  const body = { outcome };
+  if (outcome === 'edited') body.final_text = String(text || '').trim();
+  box.querySelectorAll('button').forEach(button => { button.disabled = true; });
+  try {
+    const payload = await api(`/action-queue/${encodeURIComponent(item.action_id)}/feedback`, { method: 'POST', body });
+    const nextState = payload?.human_confirmation_state || outcome;
+    const updated = { ...item, human_confirmation_state: nextState };
+    renderActionDetail(updated);
+    const nextBox = $('#actionDetailContent .action-draft-box');
+    if (nextBox) setActionDraftStatus(nextBox, outcome === 'rejected' ? '已记录为拒绝。' : '人工反馈已保存到本机。', 'success');
+  } catch (error) {
+    box.querySelectorAll('button').forEach(button => { button.disabled = false; });
+    setActionDraftStatus(box, error.message, 'error');
+  }
 }
 
 function levelLabel(level) {
@@ -345,7 +884,7 @@ async function submitDraft(event) {
   }
 }
 
-async function sendFeedback(outcome) {
+async function saveDraftFeedback(outcome) {
   if (!state.currentDraft) return;
   const body = { outcome };
   if (outcome === 'edited') body.final_text = $('#draftText').value.trim();
@@ -362,7 +901,7 @@ async function copyDraft() {
   const text = $('#draftText').value;
   try {
     await navigator.clipboard.writeText(text);
-    $('#feedbackStatus').textContent = '已复制；请人工检查后发送。';
+    $('#feedbackStatus').textContent = '已复制；请人工检查后使用。';
   } catch (error) {
     $('#draftText').focus();
     $('#draftText').select();
@@ -504,10 +1043,14 @@ function bindEvents() {
     state.sampleStatus = button.dataset.sampleStatus;
     void loadSamples();
   }));
+  $('#actionQueueFilters').addEventListener('submit', event => {
+    event.preventDefault();
+    void loadActionQueue();
+  });
   $('#openDraftView').addEventListener('click', () => switchView('draft'));
   $('#draftForm').addEventListener('submit', submitDraft);
   $('#copyDraft').addEventListener('click', copyDraft);
-  $$('[data-feedback]').forEach(button => button.addEventListener('click', () => void sendFeedback(button.dataset.feedback)));
+  $$('[data-feedback]').forEach(button => button.addEventListener('click', () => void saveDraftFeedback(button.dataset.feedback)));
   $('#tokenForm').addEventListener('submit', event => {
     event.preventDefault();
     const value = $('#apiToken').value.trim();
@@ -524,17 +1067,21 @@ function bindEvents() {
 
 async function initialize() {
   clearNotice();
-  await loadHealth();
-  await loadCustomers();
-  void loadReviewQueues();
+  $('#actionDate').value = $('#actionDate').value || shanghaiDateValue();
+  await Promise.all([loadHealth(), loadActionQueue()]);
+  if (!isDashboard) {
+    void loadCustomers();
+    void loadReviewQueues();
+  }
 }
 
 document.addEventListener('DOMContentLoaded', () => {
   bindEvents();
   if (isDashboard) {
-    $('#tokenForm').closest('.status-card').classList.add('hidden');
-  } else {
-    $('#apiToken').value = token();
+    $$('.nav-item').forEach(item => {
+      if (!['actions', 'system'].includes(item.dataset.view)) item.classList.add('hidden');
+    });
   }
+  $('#apiToken').value = token();
   void initialize();
 });

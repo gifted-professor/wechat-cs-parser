@@ -55,8 +55,8 @@ class SchemaV2Tests(unittest.TestCase):
                     "card_outcomes",
                 }.issubset(names)
             )
-            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 2)
-            self.assertEqual(SCHEMA_VERSION, 2)
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 3)
+            self.assertEqual(SCHEMA_VERSION, 3)
 
             role_columns = {
                 row[1]: row for row in connection.execute("PRAGMA table_info(role_calibration)")

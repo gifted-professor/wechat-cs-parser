@@ -42,11 +42,27 @@ class CanonicalOrder:
     return_status: Optional[str]
     source_hash: str
     quality_flags: Tuple[str, ...]
+    sku_name: Optional[str] = None
+    factory: Optional[str] = None
+    category: Optional[str] = None
+    color: Optional[str] = None
+    size: Optional[str] = None
 
 
 def _text(value: object) -> Optional[str]:
     text = str(value or "").strip()
     return text or None
+
+
+def _product_fact(value: object, *, max_length: int = 200) -> Optional[str]:
+    """Keep a bounded local product fact while stripping accidental PII."""
+
+    text = _text(value)
+    if text is None:
+        return None
+    redacted, _flags = redact_text(text)
+    normalized = redacted.strip()
+    return normalized[:max_length] or None
 
 
 def parse_synced_at(value: object) -> datetime:
@@ -186,7 +202,11 @@ def normalize_order(
     phone_hmac = global_phone_hmac(secret, phone) if phone else None
     refund_reason = _scrub_refund_reason(row.get("refund_reason"), row)
     return CanonicalOrder(
-        order_line_id=hmac_id(secret, "order-line", source_namespace, record_id),
+        # A record may change between source snapshots.  Include the snapshot
+        # hash so older local facts remain versioned instead of being rewritten.
+        order_line_id=hmac_id(
+            secret, "order-line", source_namespace, record_id, source_hash
+        ),
         source_namespace=source_namespace,
         record_id=record_id,
         phone_hmac=phone_hmac,
@@ -201,6 +221,11 @@ def normalize_order(
         return_status=return_status,
         source_hash=source_hash,
         quality_flags=tuple(sorted(flags)),
+        sku_name=_product_fact(row.get("sku_name")),
+        factory=_product_fact(row.get("factory")),
+        category=_product_fact(row.get("category") or row.get("product_category")),
+        color=_product_fact(row.get("color"), max_length=80),
+        size=_product_fact(row.get("size"), max_length=80),
     )
 
 
@@ -315,7 +340,9 @@ def import_orders(
                 (ORDER_RULE_VERSION, run["run_id"]),
             )
             connection.execute("DELETE FROM card_outcomes")
-            connection.execute("DELETE FROM order_snapshots")
+            connection.execute(
+                "UPDATE order_snapshots SET state='superseded' WHERE state='active'"
+            )
             connection.execute(
                 """
                 INSERT OR IGNORE INTO source_snapshots(
@@ -359,9 +386,10 @@ def import_orders(
                 """
                 INSERT INTO orders(
                     order_line_id,order_snapshot_id,source_namespace,record_id,phone_hmac,
-                    paid_on,revenue_minor,currency,platform,refund_type,refund_reason,
-                    refund_amount_minor,refund_on,return_status,source_hash,quality_flags_json
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    paid_on,revenue_minor,currency,platform,sku_name,factory,category,color,size,
+                    refund_type,refund_reason,refund_amount_minor,refund_on,return_status,
+                    source_hash,quality_flags_json
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 [
                     (
@@ -374,6 +402,11 @@ def import_orders(
                         order.revenue_minor,
                         order.currency,
                         order.platform,
+                        order.sku_name,
+                        order.factory,
+                        order.category,
+                        order.color,
+                        order.size,
                         order.refund_type,
                         order.refund_reason,
                         order.refund_amount_minor,
