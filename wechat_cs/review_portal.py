@@ -50,6 +50,8 @@ DEFAULT_HMAC_SECRET_PATH = Path(
 MAX_BODY_BYTES = 64 * 1024
 DEFAULT_MESSAGE_LIMIT = 20
 MAX_MESSAGE_LIMIT = 100
+PROACTIVE_ORDER_RECENCY_LIMIT_DAYS = 365
+STALE_ORDER_PRIORITY_PENALTY = 60
 IDENTIFIER = re.compile(r"[A-Za-z0-9_.:-]{1,160}")
 SHARED_REVIEWER_KEY = "operator-shared-workbench"
 PHONE = re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)")
@@ -626,7 +628,17 @@ def _business_view(
         service_score = 0
     if unknown_aftersales_count:
         service_score = min(service_score, 8)
-    priority_score = min(100, average_score + spend_score + loyalty_score + timing_score + service_score)
+    priority_score_before_recency_penalty = min(
+        100,
+        average_score + spend_score + loyalty_score + timing_score + service_score,
+    )
+    proactive_followup_blocked = bool(
+        recency is not None and recency > PROACTIVE_ORDER_RECENCY_LIMIT_DAYS
+    )
+    recency_penalty = (
+        STALE_ORDER_PRIORITY_PENALTY if proactive_followup_blocked else 0
+    )
+    priority_score = max(priority_score_before_recency_penalty - recency_penalty, 0)
 
     exclusion_reasons = []
     if contact_refusal:
@@ -635,6 +647,11 @@ def _business_view(
         exclusion_reasons.append("历史售后率 %.0f%%，先服务、不促销" % (aftersales_rate * 100))
     if paid_order_count == 0:
         exclusion_reasons.append("没有有效付款记录")
+    if proactive_followup_blocked:
+        exclusion_reasons.append(
+            "最近一次有效付款距数据截止日 %d 天，已超过 %d 天，不进入主动促单"
+            % (int(recency), PROACTIVE_ORDER_RECENCY_LIMIT_DAYS)
+        )
     if exclusion_reasons:
         promotion_state = "excluded"
     elif unknown_aftersales_count:
@@ -645,7 +662,9 @@ def _business_view(
     else:
         promotion_state = "eligible"
     promotion_eligible = promotion_state == "eligible"
-    if promotion_state == "excluded":
+    if proactive_followup_blocked:
+        priority_label = "超过一年，不跟进"
+    elif promotion_state == "excluded":
         priority_label = "仅服务，不促销"
     elif promotion_state == "review":
         priority_label = "售后待确认"
@@ -680,6 +699,9 @@ def _business_view(
         aftersales_text += "，另有 %d 条待确认" % unknown_aftersales_count
     return {
         "priority_score": priority_score,
+        "priority_score_before_recency_penalty": priority_score_before_recency_penalty,
+        "recency_penalty": recency_penalty,
+        "proactive_followup_blocked": proactive_followup_blocked,
         "priority_label": priority_label,
         "promotion_eligible": promotion_eligible,
         "promotion_state": promotion_state,
@@ -702,7 +724,11 @@ def _business_view(
             "客单均额 ¥%s" % ("%.2f" % average_yuan).rstrip("0").rstrip("."),
             "%d 条有效付款记录，%d 次复购" % (paid_order_count, max(paid_order_count - 1, 0)),
             "售后表现：%s" % aftersales_text,
-        ],
+        ] + (
+            ["超过一年未付款：-%d 分" % STALE_ORDER_PRIORITY_PENALTY]
+            if proactive_followup_blocked
+            else []
+        ),
     }
 
 
@@ -1459,6 +1485,8 @@ class ReviewPortalHandler(BaseHTTPRequestHandler):
                     "latest_verdict": row.get("latest_verdict"),
                     "card_version": row["card_version"],
                     "priority_score": business["priority_score"],
+                    "recency_penalty": business["recency_penalty"],
+                    "proactive_followup_blocked": business["proactive_followup_blocked"],
                     "priority_label": business["priority_label"],
                     "promotion_eligible": business["promotion_eligible"],
                     "promotion_state": business["promotion_state"],

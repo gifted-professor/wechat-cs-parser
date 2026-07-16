@@ -867,11 +867,15 @@ function renderProfileList() {
     const score = element('span', 'sample-score', scoreCopy);
     score.title = promotionState === 'eligible'
       ? `促单优先分 ${profile.priority_score}`
-      : (promotionState === 'review' ? '售后事实待确认' : '已排除促销');
+      : (promotionState === 'review'
+        ? '售后事实待确认'
+        : (profile.proactive_followup_blocked ? '超过一年未付款，已排除主动促单' : '已排除促销'));
     const copy = element('span', 'sample-copy');
     const stateLabel = promotionState === 'eligible'
       ? profile.priority_label
-      : (promotionState === 'review' ? '售后待确认' : '仅服务、不促销');
+      : (promotionState === 'review'
+        ? '售后待确认'
+        : (profile.proactive_followup_blocked ? '超过一年，不跟进' : '仅服务、不促销'));
     copy.append(
       element('b', '', profile.label),
       element('small', '', `${profile.phone_hint} · ${stateLabel}`),

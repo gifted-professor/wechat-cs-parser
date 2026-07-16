@@ -9,7 +9,11 @@ import unittest
 from pathlib import Path
 
 from wechat_cs.identity import global_phone_hmac
-from wechat_cs.review_portal import _ensure_opening_review_schema, create_server
+from wechat_cs.review_portal import (
+    _business_view,
+    _ensure_opening_review_schema,
+    create_server,
+)
 from wechat_cs.store import initialize_schema
 
 
@@ -629,6 +633,49 @@ class ReviewPortalTests(unittest.TestCase):
         self.assertTrue(all_profiles["items"][0]["promotion_eligible"])
         self.assertEqual(all_profiles["items"][1]["promotion_state"], "review")
         self.assertFalse(all_profiles["items"][-1]["promotion_eligible"])
+
+    def test_more_than_one_year_since_last_payment_blocks_proactive_followup(self) -> None:
+        def facts(paid_on: str) -> dict:
+            return {
+                "as_of_at": NOW,
+                "customer_features": {},
+                "orders": [
+                    {
+                        "paid_on": paid_on,
+                        "paid_at": paid_on + "T00:00:00+08:00",
+                        "revenue_minor": 600000,
+                        "refund_type": None,
+                        "refund_fact_at_cutoff": False,
+                    }
+                ],
+            }
+
+        boundary = _business_view(
+            facts("2025-07-13"),
+            contact_refusal=False,
+            future_signal=True,
+        )
+        stale = _business_view(
+            facts("2025-07-12"),
+            contact_refusal=False,
+            future_signal=True,
+        )
+
+        self.assertEqual(boundary["days_since_last_order"], 365)
+        self.assertEqual(boundary["promotion_state"], "eligible")
+        self.assertFalse(boundary["proactive_followup_blocked"])
+
+        self.assertEqual(stale["days_since_last_order"], 366)
+        self.assertEqual(stale["promotion_state"], "excluded")
+        self.assertFalse(stale["promotion_eligible"])
+        self.assertTrue(stale["proactive_followup_blocked"])
+        self.assertEqual(stale["recency_penalty"], 60)
+        self.assertEqual(
+            stale["priority_score"],
+            max(stale["priority_score_before_recency_penalty"] - 60, 0),
+        )
+        self.assertEqual(stale["priority_label"], "超过一年，不跟进")
+        self.assertIn("超过 365 天", stale["exclusion_reason"])
 
     def test_opening_review_upsert_version_conflict_and_no_placeholder_scores(self) -> None:
         status, created = self.request("POST", "/api/profiles/sales-profile-1/review", self.valid_review())
