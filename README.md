@@ -128,10 +128,14 @@ python3 -m wechat_cs.review_portal \
   --run-id sales-profile-run_固定批次 \
   --customer-data /absolute/path/to/customer_action_data.json \
   --hmac-secret-file /absolute/path/to/hmac_secret \
+  --conversion-audit-dir /absolute/path/to/conversion-attribution-v1 \
+  --conversion-db /absolute/path/to/conversion-audit-run.sqlite3 \
   --allowed-host 你的受控内网地址
 ```
 
 同一 Tailscale 私网内、且网络策略允许访问该设备的员工打开地址后即可读取数据。客户列表只显示掩码手机号，进入详情后才显示完整号码。页面明确标注“默认满库存”“联系前核对最新状态”，证据区仍会隐藏手机号、身份证号和内部证据编号。如果需要给外部人员做匿名验收，必须另建不加载客户身份源的独立服务，不能复用这个内部工作台。
+
+配置 `--conversion-audit-dir` 与 `--conversion-db` 后，同一页面会增加“成交方法论审核”页签。归因报告和聊天数据库始终只读；人工结论单独写入归因目录下的 `manual_reviews.sqlite3`，不会改动 50 人画像审核表。页面只把 `eligible_for_sales_method=true` 的 7 天成交正样本和可比未成交负样本放入默认审核队列，并优先展示价格阻力、报价后沉默、客户主动咨询和 90 天复购信号。该页签固定声明历史相关性不代表因果，保存审核也不会训练权重、修改客户分数或发送消息。
 
 内部工作台只使用以下接口：
 
@@ -140,6 +144,10 @@ python3 -m wechat_cs.review_portal \
 - `GET /api/profiles/{sales_profile_id}`
 - `GET /api/profiles/{sales_profile_id}/messages?limit=&before=`
 - `POST /api/profiles/{sales_profile_id}/review`
+- `GET /api/conversion/summary`
+- `GET /api/conversion/samples?status=&sample_state=&signal=&limit=&offset=`
+- `GET /api/conversion/samples/{episode_id}`
+- `POST /api/conversion/samples/{episode_id}/review`
 
 聊天接口只返回冻结批次内的 `message_ref`、角色、时间和去敏文字；审核表只保存被选消息的引用，不复制聊天正文。连带购买建议只统计无取消、无退货且没有未结售后的有效订单，并显示样本人数；人工搭配方向不能冒充数据结论。
 

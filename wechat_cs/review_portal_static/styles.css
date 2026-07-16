@@ -58,7 +58,7 @@ input:focus, select:focus, textarea:focus, button:focus-visible {
   outline: none;
 }
 
-#saveReview {
+#saveReview, #saveMethodReview {
   width: 100%; min-height: 48px; margin-top: 16px;
   border: 0; border-radius: 12px;
   background: var(--green); color: white; font-weight: 800;
@@ -89,6 +89,24 @@ input:focus, select:focus, textarea:focus, button:focus-visible {
 .assumption span { color: #bfd6ca; font-size: 11px; }
 .assumption strong { color: #ffe1a8; font-size: 17px; }
 
+.mode-tabs {
+  margin: 18px 0;
+  padding: 6px;
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px;
+  border: 1px solid var(--line); border-radius: 17px;
+  background: rgba(255, 253, 248, .9); box-shadow: var(--shadow);
+}
+.mode-tabs button {
+  min-height: 68px; padding: 12px 18px;
+  display: grid; gap: 4px; justify-items: start;
+  border: 0; border-radius: 12px; background: transparent; color: var(--ink); text-align: left;
+}
+.mode-tabs button:hover { background: #f1f4ef; }
+.mode-tabs button.active { background: var(--green); color: white; }
+.mode-tabs b { font-size: 15px; }
+.mode-tabs small { color: var(--muted); font-size: 11px; }
+.mode-tabs button.active small { color: #c9e0d4; }
+
 .progress-board {
   position: relative;
   margin: 18px 0;
@@ -100,6 +118,7 @@ input:focus, select:focus, textarea:focus, button:focus-visible {
 .progress-board article { display: grid; gap: 3px; }
 .progress-board span { color: var(--muted); font-size: 12px; }
 .progress-board strong { font-family: Georgia, "Songti SC", serif; font-size: 31px; }
+.progress-board strong.text-status { font-family: "Songti SC", STSong, serif; font-size: 24px; }
 .progress-board small { color: var(--muted); font-size: 11px; }
 .progress-track { position: absolute; left: 0; right: 0; bottom: 0; height: 6px; background: #e4e8e3; }
 .progress-track span { display: block; width: 0; height: 100%; background: var(--green-2); transition: width .3s ease; }
@@ -334,8 +353,9 @@ blockquote small { margin-right: 8px; color: var(--muted); }
 .verdict-field input:checked + span { border-color: var(--green); background: var(--green-soft); box-shadow: inset 0 0 0 1px var(--green); }
 .submit-row { display: grid; grid-template-columns: minmax(220px, 340px) 1fr; gap: 14px; align-items: center; }
 #saveReview { margin: 0; }
-#saveReview:disabled { opacity: .55; cursor: wait; }
-#saveStatus { color: var(--green); font-size: 13px; }
+#saveReview, #saveMethodReview { margin: 0; }
+#saveReview:disabled, #saveMethodReview:disabled { opacity: .55; cursor: wait; }
+#saveStatus, #methodSaveStatus { color: var(--green); font-size: 13px; }
 .review-history { margin-top: 18px; display: grid; gap: 10px; }
 .review-history h4 { margin: 0; font-size: 13px; }
 .review-history article { padding: 14px; border: 1px solid #dfe3dd; border-radius: 11px; background: white; }
@@ -345,12 +365,43 @@ blockquote small { margin-right: 8px; color: var(--muted); }
 .review-history p { margin: 9px 0 0; padding: 10px 12px; border-radius: 9px; background: var(--green-soft); font-size: 13px; line-height: 1.65; }
 footer { padding: 22px; color: var(--muted); font-size: 12px; text-align: center; }
 
+.conversion-shell { display: grid; gap: 18px; }
+.conversion-boundary {
+  padding: 18px 20px; display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px;
+  border: 1px solid #e3c486; border-radius: 17px; background: #fff8e7; box-shadow: var(--shadow);
+}
+.conversion-boundary > div { display: grid; gap: 4px; }
+.conversion-boundary b { color: #76501b; font-size: 14px; }
+.conversion-boundary span { color: #82683c; font-size: 12px; line-height: 1.6; }
+.conversion-progress { margin: 0; }
+.conversion-workspace { display: grid; grid-template-columns: 360px minmax(0, 1fr); gap: 18px; align-items: start; }
+.method-sample-panel { position: sticky; top: 18px; max-height: calc(100vh - 36px); }
+.method-toolbar { grid-template-columns: 1fr 1fr; }
+.method-toolbar label:last-child { grid-column: 1 / -1; }
+.method-sample-row .sample-score { font-size: 12px; }
+.method-sample-row.converted .sample-score { background: var(--green-soft); color: var(--green); }
+.method-sample-row.not-converted .sample-score { background: var(--amber-soft); color: var(--amber); }
+.method-sample-row.selected { background: #eef5ef; }
+.method-signal-cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 11px; }
+.method-signal-cards article { padding: 15px; display: grid; gap: 6px; border: 1px solid var(--line); border-radius: 12px; background: #fafaf6; }
+.method-signal-cards span { color: var(--muted); font-size: 11px; }
+.method-signal-cards b { font-size: 14px; line-height: 1.5; }
+.method-review-section { padding: 27px 28px; border-bottom: 1px solid var(--line); }
+.method-review-section:last-child { border-bottom: 0; }
+.method-note { margin: -4px 0 12px; color: var(--muted); font-size: 11px; line-height: 1.6; }
+.method-messages { max-height: 600px; margin-top: 0; padding: 14px; border: 1px solid var(--line); border-radius: 14px; background: #f8f8f4; }
+.method-correction-fields { margin: 0 0 18px; padding: 16px; display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; border-radius: 13px; background: #f3f6f2; }
+.method-correction-fields label:last-child { grid-column: 1 / -1; }
+.method-detail-panel .decision-review { padding: 18px; }
+.method-detail-panel .detail-empty { min-height: 640px; }
+
 @media (max-width: 1220px) {
   .workspace { grid-template-columns: 310px 1fr; }
   .value-hero { grid-template-columns: 1fr 190px; }
   .value-metrics { grid-template-columns: repeat(2, 1fr); }
   .value-metrics article:nth-child(2) { border-right: 0; }
   .value-metrics article:nth-child(-n+2) { border-bottom: 1px solid var(--line); }
+  .conversion-workspace { grid-template-columns: 320px 1fr; }
 }
 
 @media (max-width: 900px) {
@@ -361,6 +412,8 @@ footer { padding: 22px; color: var(--muted); font-size: 12px; text-align: center
   .decision-grid { grid-template-columns: 1fr; }
   .cross-sell-recommendations { grid-template-columns: repeat(2, 1fr); }
   .priority-options { grid-template-columns: repeat(2, 1fr); }
+  .conversion-workspace { display: block; }
+  .method-sample-panel { position: static; max-height: none; margin-bottom: 14px; }
 }
 
 @media (max-width: 680px) {
@@ -386,4 +439,8 @@ footer { padding: 22px; color: var(--muted); font-size: 12px; text-align: center
   .fact-summary { grid-template-columns: repeat(2, 1fr); }
   .evidence-panel { margin: 16px 20px; }
   .submit-row { grid-template-columns: 1fr; }
+  .mode-tabs { grid-template-columns: 1fr; }
+  .conversion-boundary, .method-signal-cards, .method-correction-fields { grid-template-columns: 1fr; }
+  .method-correction-fields label:last-child { grid-column: auto; }
+  .method-review-section { padding: 22px 20px; }
 }

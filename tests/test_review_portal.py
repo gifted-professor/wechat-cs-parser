@@ -24,6 +24,8 @@ class ReviewPortalTests(unittest.TestCase):
         self.db_path = root / "portal.sqlite3"
         self.customer_data_path = root / "customer_action_data.json"
         self.hmac_secret_path = root / "hmac_secret"
+        self.conversion_audit_dir = root / "conversion-audit"
+        self.conversion_audit_dir.mkdir()
         self.hmac_secret_path.write_text(HMAC_SECRET, encoding="utf-8")
         self.customer_data_path.write_text(
             json.dumps(
@@ -56,6 +58,71 @@ class ReviewPortalTests(unittest.TestCase):
         initialize_schema(conn)
         self._seed(conn)
         conn.close()
+        self.conversion_audit_dir.joinpath("report.json").write_text(
+            json.dumps(
+                {
+                    "audit_version": "conversion-attribution-audit-v1",
+                    "requested_as_of": NOW,
+                    "weights_trained": False,
+                    "population": {
+                        "contact_episode_count": 2,
+                        "purchase_event_count": 3,
+                        "repeat_purchase_event_count": 1,
+                    },
+                    "episode_sample_counts": {
+                        "converted_7d": 1,
+                        "non_converted_7d": 1,
+                    },
+                    "training_gate": {
+                        "ready": False,
+                        "weights_trained": False,
+                        "manual_review_required": True,
+                        "blockers": ["manual_sample_review_not_completed"],
+                    },
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        conversion_samples = [
+            {
+                "episode_id": "episode-price-review",
+                "customer_key": "customer-1",
+                "origin": "customer_initiated",
+                "intent": "sales_inquiry",
+                "explicit_price_barrier": "discount_request",
+                "suspected_barrier": "quote_then_silence_suspected",
+                "talk_track_primary": "price_quote",
+                "talk_track_tags": ["price_quote"],
+                "ended_on": "2026-07-03",
+                "sample_state": "non_converted_7d",
+                "purchase_event_ids": [],
+                "repeat_90d": None,
+                "eligible_for_sales_method": True,
+            },
+            {
+                "episode_id": "episode-repeat-review",
+                "customer_key": "customer-1",
+                "origin": "customer_initiated",
+                "intent": "sales_inquiry",
+                "explicit_price_barrier": "none",
+                "suspected_barrier": "none",
+                "talk_track_primary": "product_recommendation",
+                "talk_track_tags": ["product_recommendation"],
+                "ended_on": "2026-07-03",
+                "sample_state": "converted_7d",
+                "purchase_event_ids": ["purchase-internal"],
+                "repeat_90d": True,
+                "eligible_for_sales_method": True,
+            },
+        ]
+        self.conversion_audit_dir.joinpath("episode_samples.jsonl").write_text(
+            "".join(
+                json.dumps(item, ensure_ascii=False) + "\n"
+                for item in conversion_samples
+            ),
+            encoding="utf-8",
+        )
         self.server = create_server(
             "127.0.0.1",
             0,
@@ -63,6 +130,8 @@ class ReviewPortalTests(unittest.TestCase):
             run_id="sales-run",
             customer_data_path=self.customer_data_path,
             hmac_secret_path=self.hmac_secret_path,
+            conversion_audit_dir=self.conversion_audit_dir,
+            conversion_db_path=self.db_path,
         )
         self.thread = threading.Thread(
             target=self.server.serve_forever,
@@ -393,6 +462,9 @@ class ReviewPortalTests(unittest.TestCase):
         self.assertIn("我来写一版", page)
         self.assertIn("这个客户画像或推荐还要怎么改", page)
         self.assertIn("历史订单", page)
+        self.assertIn("客户跟进审核", page)
+        self.assertIn("成交方法论审核", page)
+        self.assertIn("历史相关性，不代表因果", page)
         self.assertNotIn("事实准确度", page)
         self.assertNotIn("访问码", page)
         status, payload = self.request("GET", "/api/summary")
@@ -400,6 +472,56 @@ class ReviewPortalTests(unittest.TestCase):
         self.assertEqual(payload["total"], 3)
         status, payload = self.request("GET", "/api/summary", host="evil.example")
         self.assertEqual((status, payload["error"]["code"]), (403, "host_denied"))
+
+    def test_conversion_review_api_is_separate_from_opening_reviews(self) -> None:
+        status, summary = self.request("GET", "/api/conversion/summary")
+        self.assertEqual(status, 200)
+        self.assertEqual(summary["method_sample_total"], 2)
+        self.assertEqual(summary["reviewed"], 0)
+        self.assertFalse(summary["weights_trained"])
+
+        status, listing = self.request(
+            "GET", "/api/conversion/samples?status=pending&signal=price_barrier"
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(listing["total"], 1)
+        self.assertEqual(listing["items"][0]["episode_id"], "episode-price-review")
+
+        status, detail = self.request(
+            "GET", "/api/conversion/samples/episode-price-review"
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(detail["sample_state"], "non_converted_7d")
+        self.assertTrue(detail["messages"])
+        self.assertNotIn("customer-1", json.dumps(detail, ensure_ascii=False))
+
+        with sqlite3.connect(str(self.db_path)) as conn:
+            old_review_count = conn.execute(
+                "SELECT COUNT(*) FROM sales_profile_opening_reviews"
+            ).fetchone()[0]
+        status, saved = self.request(
+            "POST",
+            "/api/conversion/samples/episode-price-review/review",
+            {
+                "audit_version": "conversion-attribution-audit-v1",
+                "verdict": "approved",
+                "corrected_origin": "",
+                "corrected_intent": "",
+                "corrected_explicit_price_barrier": "",
+                "corrected_suspected_barrier": "",
+                "corrected_talk_track_primary": "",
+                "note": "标签和上下文一致。",
+            },
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(saved["review"]["verdict"], "approved")
+        with sqlite3.connect(str(self.db_path)) as conn:
+            new_review_count = conn.execute(
+                "SELECT COUNT(*) FROM sales_profile_opening_reviews"
+            ).fetchone()[0]
+        self.assertEqual(new_review_count, old_review_count)
+        status, summary = self.request("GET", "/api/conversion/summary")
+        self.assertEqual((status, summary["reviewed"]), (200, 1))
 
     def test_internal_identity_business_metrics_and_enum_translation(self) -> None:
         status, listing = self.request("GET", "/api/profiles?promotion=all")

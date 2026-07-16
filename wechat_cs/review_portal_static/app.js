@@ -13,6 +13,10 @@ const state = {
   messagesSnapshotAt: '',
   messageRequestToken: 0,
   selectedEvidenceRef: '',
+  workspace: 'followup',
+  conversionLoaded: false,
+  conversionSamples: [],
+  currentConversion: null,
 };
 
 const $ = selector => document.querySelector(selector);
@@ -50,6 +54,31 @@ const priorityReasonLabels = {
   purchased_elsewhere: '已在别处购买',
   insufficient_chat_signal: '聊天信号不足',
   other: '其他',
+};
+
+const methodLabels = {
+  customer_initiated: '客户主动咨询',
+  studio_initiated: '我们主动跟进',
+  sales_inquiry: '销售咨询',
+  general_or_unknown: '一般沟通 / 意图不明确',
+  none: '无',
+  explicit_price_objection: '明确表示价格贵',
+  promotion_wait: '等待活动或降价',
+  discount_request: '询问优惠',
+  quote_then_silence_suspected: '报价后沉默（疑似）',
+  price_quote: '报价',
+  promotion_offer: '活动优惠',
+  product_recommendation: '商品推荐',
+  trust_proof: '信任证明',
+  scarcity_or_urgency: '稀缺 / 紧迫',
+  question_or_clarification: '提问澄清',
+  other_observed_reply: '其他已观察回复',
+  no_observed_reply: '未观察到回复',
+  converted_7d: '7 天内成交',
+  non_converted_7d: '7 天未成交',
+  approved: '可纳入方法论',
+  corrected: '修正后纳入',
+  rejected: '排除样本',
 };
 
 const fieldLabels = {
@@ -473,6 +502,249 @@ async function loadMessages({ before = '' } = {}) {
   }
 }
 
+function switchWorkspace(name) {
+  state.workspace = name === 'conversion' ? 'conversion' : 'followup';
+  document.querySelectorAll('[data-workspace]').forEach(button => {
+    button.classList.toggle('active', button.dataset.workspace === state.workspace);
+  });
+  const isConversion = state.workspace === 'conversion';
+  $('#followupProgress').classList.toggle('hidden', isConversion);
+  $('#followupWorkspace').classList.toggle('hidden', isConversion);
+  $('#conversionWorkspace').classList.toggle('hidden', !isConversion);
+  if (isConversion && !state.conversionLoaded) {
+    refreshConversion().catch(error => {
+      setText('#methodListCount', '读取失败');
+      $('#methodSampleList').replaceChildren(element('div', 'loading', `归因样本读取失败：${error.message}`));
+    });
+  }
+}
+
+async function loadConversionSummary() {
+  const summary = await api('/api/conversion/summary');
+  setText('#methodSampleTotal', summary.method_sample_total);
+  setText('#methodConvertedCount', summary.converted_7d);
+  setText('#methodNegativeCount', summary.non_converted_7d);
+  setText('#methodReviewedCount', summary.reviewed);
+  setText('#methodReviewProgress', `${summary.reviewed} / ${summary.method_sample_total} 已审核`);
+  const percent = summary.method_sample_total
+    ? Math.round(summary.reviewed / summary.method_sample_total * 100)
+    : 0;
+  $('#methodProgressBar').style.width = `${percent}%`;
+  return summary;
+}
+
+async function loadConversionSamples(keepSelection = true) {
+  const params = new URLSearchParams({ limit: '100' });
+  const status = $('#methodStatusFilter').value;
+  const sampleState = $('#methodStateFilter').value;
+  const signal = $('#methodSignalFilter').value;
+  if (status) params.set('status', status);
+  if (sampleState) params.set('sample_state', sampleState);
+  if (signal) params.set('signal', signal);
+  const payload = await api(`/api/conversion/samples?${params.toString()}`);
+  state.conversionSamples = payload.items || [];
+  renderConversionList(payload.total || 0);
+  const currentId = keepSelection ? state.currentConversion?.episode_id : '';
+  const target = state.conversionSamples.find(item => item.episode_id === currentId)
+    || state.conversionSamples[0];
+  if (target) {
+    if (!state.currentConversion || state.currentConversion.episode_id !== target.episode_id || !keepSelection) {
+      await selectConversionSample(target.episode_id);
+    }
+  } else {
+    state.currentConversion = null;
+    $('#methodDetailContent').classList.add('hidden');
+    $('#methodDetailEmpty').classList.remove('hidden');
+  }
+}
+
+function renderConversionList(total = state.conversionSamples.length) {
+  const list = $('#methodSampleList');
+  list.replaceChildren();
+  setText('#methodListCount', `${total} 条`);
+  if (!state.conversionSamples.length) {
+    list.append(element('div', 'loading', '当前筛选下没有待核对样本'));
+    return;
+  }
+  state.conversionSamples.forEach((sample, index) => {
+    const converted = sample.sample_state === 'converted_7d';
+    const button = element(
+      'button',
+      `sample-row method-sample-row ${converted ? 'converted' : 'not-converted'}`,
+    );
+    button.type = 'button';
+    button.dataset.id = sample.episode_id;
+    if (state.currentConversion?.episode_id === sample.episode_id) button.classList.add('selected');
+    const score = element('span', 'sample-score', converted ? '成交' : '未成');
+    const copy = element('span', 'sample-copy');
+    const keySignal = sample.explicit_price_barrier !== 'none'
+      ? methodLabels[sample.explicit_price_barrier]
+      : sample.suspected_barrier !== 'none'
+        ? methodLabels[sample.suspected_barrier]
+        : methodLabels[sample.talk_track_primary];
+    copy.append(
+      element('b', '', sample.sample_label),
+      element('small', '', `${sample.ended_on} · ${keySignal || '一般样本'}`),
+    );
+    const status = element(
+      'em',
+      sample.reviewed ? `status ${sample.latest_verdict}` : 'status',
+      sample.reviewed ? (methodLabels[sample.latest_verdict] || '已审核') : '待审核',
+    );
+    button.append(score, copy, status);
+    button.setAttribute('aria-label', `${index + 1}，${sample.sample_label}，${status.textContent}`);
+    button.addEventListener('click', () => selectConversionSample(sample.episode_id));
+    list.append(button);
+  });
+}
+
+function methodSignalCard(label, value) {
+  const card = element('article');
+  card.append(element('span', '', label), element('b', '', value || '无'));
+  return card;
+}
+
+function fillConversionReview(detail) {
+  document.querySelectorAll('[name="method_verdict"]').forEach(input => { input.checked = false; });
+  const review = detail.review || null;
+  const verdict = review?.verdict || '';
+  const verdictInput = verdict
+    ? document.querySelector(`[name="method_verdict"][value="${verdict}"]`)
+    : null;
+  if (verdictInput) verdictInput.checked = true;
+  const values = {
+    correctedOrigin: review?.corrected_origin || detail.origin,
+    correctedIntent: review?.corrected_intent || detail.intent,
+    correctedPriceBarrier: review?.corrected_explicit_price_barrier || detail.explicit_price_barrier,
+    correctedSuspectedBarrier: review?.corrected_suspected_barrier || detail.suspected_barrier,
+    correctedTalkTrack: review?.corrected_talk_track_primary || detail.talk_track_primary,
+  };
+  Object.entries(values).forEach(([id, value]) => { $(`#${id}`).value = value; });
+  $('#methodReviewNote').value = review?.note || '';
+  setText('#methodReviewNoteCount', String($('#methodReviewNote').value.length));
+  $('#methodCorrectionFields').classList.toggle('hidden', verdict !== 'corrected');
+  setText('#methodSaveStatus', '', '');
+}
+
+function renderConversionDetail(detail) {
+  const converted = detail.sample_state === 'converted_7d';
+  setText('#methodOutcome', methodLabels[detail.sample_state]);
+  setText('#methodSampleTitle', detail.sample_label);
+  setText('#methodSampleMeta', `回合结束于 ${detail.ended_on} · 审核优先级 ${detail.review_priority}`);
+  setText(
+    '#methodReviewStatus',
+    detail.review ? (methodLabels[detail.review.verdict] || '已审核') : '待审核',
+  );
+  $('#methodReviewStatus').classList.toggle('excluded', detail.review?.verdict === 'rejected');
+  $('#methodReviewStatus').classList.toggle('review', detail.review?.verdict === 'corrected');
+
+  const cards = $('#methodSignalCards');
+  cards.replaceChildren(
+    methodSignalCard('发起方', methodLabels[detail.origin]),
+    methodSignalCard('客户意图', methodLabels[detail.intent]),
+    methodSignalCard('明确价格信号', methodLabels[detail.explicit_price_barrier]),
+    methodSignalCard('疑似阻碍', methodLabels[detail.suspected_barrier]),
+    methodSignalCard('客服主要动作', methodLabels[detail.talk_track_primary]),
+    methodSignalCard('成交与复购', `${converted ? '7 天内成交' : '7 天未成交'}${detail.repeat_90d === true ? ' · 90 天内复购' : ''}`),
+  );
+
+  setText('#methodMessageNote', detail.message_window?.note, '聊天仅用于人工核对。');
+  const messages = $('#methodMessages');
+  messages.replaceChildren();
+  if (!detail.messages?.length) {
+    messages.append(element('p', 'empty-copy', '该时间窗口没有可展示的文字聊天'));
+  } else {
+    detail.messages.forEach(message => {
+      const item = element('article', `chat-message ${message.role === 'studio' ? 'staff-message' : ''}`);
+      const head = element('div', 'message-head');
+      head.append(
+        element('b', '', message.role === 'studio' ? '客服' : '客户'),
+        element('time', '', formatChatTime(message.timestamp)),
+      );
+      item.append(head, element('p', '', message.text));
+      messages.append(item);
+    });
+  }
+  fillConversionReview(detail);
+}
+
+async function selectConversionSample(episodeId) {
+  $('#methodDetailEmpty').classList.add('hidden');
+  $('#methodDetailContent').classList.remove('hidden');
+  $('#methodDetailContent').classList.add('loading-state');
+  try {
+    const detail = await api(`/api/conversion/samples/${encodeURIComponent(episodeId)}`);
+    state.currentConversion = detail;
+    renderConversionDetail(detail);
+    renderConversionList();
+  } catch (error) {
+    setText('#methodSaveStatus', error.message);
+  } finally {
+    $('#methodDetailContent').classList.remove('loading-state');
+  }
+}
+
+async function saveConversionReview(event) {
+  event.preventDefault();
+  if (!state.currentConversion) return;
+  const verdict = document.querySelector('[name="method_verdict"]:checked')?.value || '';
+  if (!verdict) {
+    setText('#methodSaveStatus', '请先选择审核结论');
+    return;
+  }
+  const note = $('#methodReviewNote').value.trim();
+  if (verdict === 'corrected' && !note) {
+    setText('#methodSaveStatus', '修正后纳入时，请填写审核说明');
+    $('#methodReviewNote').focus();
+    return;
+  }
+  const button = $('#saveMethodReview');
+  button.disabled = true;
+  setText('#methodSaveStatus', '正在保存…');
+  try {
+    await api(`/api/conversion/samples/${encodeURIComponent(state.currentConversion.episode_id)}/review`, {
+      method: 'POST',
+      body: JSON.stringify({
+        audit_version: state.currentConversion.audit_version,
+        verdict,
+        corrected_origin: verdict === 'corrected' ? $('#correctedOrigin').value : '',
+        corrected_intent: verdict === 'corrected' ? $('#correctedIntent').value : '',
+        corrected_explicit_price_barrier: verdict === 'corrected' ? $('#correctedPriceBarrier').value : '',
+        corrected_suspected_barrier: verdict === 'corrected' ? $('#correctedSuspectedBarrier').value : '',
+        corrected_talk_track_primary: verdict === 'corrected' ? $('#correctedTalkTrack').value : '',
+        note,
+      }),
+    });
+    const currentId = state.currentConversion.episode_id;
+    await Promise.all([loadConversionSummary(), loadConversionSamples(true)]);
+    if (state.conversionSamples.some(item => item.episode_id === currentId)) {
+      await selectConversionSample(currentId);
+    }
+    setText('#methodSaveStatus', '已保存，可继续审核下一条');
+  } catch (error) {
+    setText('#methodSaveStatus', error.message);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function nextConversionSample() {
+  const currentId = state.currentConversion?.episode_id;
+  const index = Math.max(0, state.conversionSamples.findIndex(item => item.episode_id === currentId));
+  const ordered = [
+    ...state.conversionSamples.slice(index + 1),
+    ...state.conversionSamples.slice(0, index + 1),
+  ];
+  const next = ordered.find(item => !item.reviewed && item.episode_id !== currentId);
+  if (next) await selectConversionSample(next.episode_id);
+  else setText('#methodSaveStatus', '当前列表已全部审核');
+}
+
+async function refreshConversion() {
+  await Promise.all([loadConversionSummary(), loadConversionSamples(false)]);
+  state.conversionLoaded = true;
+}
+
 async function refreshAll() {
   await Promise.all([loadSummary(), loadProfiles(false)]);
 }
@@ -795,11 +1067,27 @@ async function nextUnreviewed() {
 }
 
 function boot() {
+  document.querySelectorAll('[data-workspace]').forEach(button => {
+    button.addEventListener('click', () => switchWorkspace(button.dataset.workspace));
+  });
   $('#reviewForm').addEventListener('submit', saveReview);
+  $('#methodReviewForm').addEventListener('submit', saveConversionReview);
   $('#promotionFilter').addEventListener('change', () => loadProfiles(false));
   $('#stratumFilter').addEventListener('change', () => loadProfiles(false));
   $('#statusFilter').addEventListener('change', () => loadProfiles(false));
   $('#nextUnreviewed').addEventListener('click', nextUnreviewed);
+  $('#nextMethodSample').addEventListener('click', nextConversionSample);
+  ['#methodStatusFilter', '#methodStateFilter', '#methodSignalFilter'].forEach(selector => {
+    $(selector).addEventListener('change', () => loadConversionSamples(false));
+  });
+  document.querySelectorAll('[name="method_verdict"]').forEach(input => {
+    input.addEventListener('change', () => {
+      $('#methodCorrectionFields').classList.toggle('hidden', input.value !== 'corrected');
+    });
+  });
+  $('#methodReviewNote').addEventListener('input', () => {
+    setText('#methodReviewNoteCount', String($('#methodReviewNote').value.length));
+  });
   $('#editOpening').addEventListener('click', () => showOpeningEditor());
   $('#chatPanel').addEventListener('toggle', () => {
     if ($('#chatPanel').open && !state.messagesLoaded && !state.messagesLoading) loadMessages();

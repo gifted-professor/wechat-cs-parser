@@ -27,6 +27,11 @@ from statistics import median
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 from urllib.parse import parse_qs, unquote, urlsplit
 
+from .conversion_review import (
+    ConversionReviewError,
+    ConversionReviewService,
+    ConversionReviewValidationError,
+)
 from .identity import global_phone_hmac, normalize_phone
 
 
@@ -985,6 +990,7 @@ class ReviewPortalServer(ThreadingHTTPServer):
         allowed_hosts: Sequence[str],
         customer_index: Mapping[str, Mapping[str, str]],
         customer_source_synced_at: Optional[str],
+        conversion_review: Optional[ConversionReviewService],
     ) -> None:
         super().__init__(address, ReviewPortalHandler)
         self.db_path = db_path
@@ -994,6 +1000,7 @@ class ReviewPortalServer(ThreadingHTTPServer):
             str(key): dict(value) for key, value in customer_index.items()
         }
         self.customer_source_synced_at = customer_source_synced_at
+        self.conversion_review = conversion_review
         self.cursor_key = hashlib.sha256(
             ("review-portal-message-cursor\0" + str(db_path)).encode("utf-8")
         ).digest()
@@ -1026,6 +1033,22 @@ class ReviewPortalHandler(BaseHTTPRequestHandler):
                 return
             if method == "GET" and path == "/api/summary":
                 self._summary()
+            elif method == "GET" and path == "/api/conversion/summary":
+                self._conversion_summary()
+            elif method == "GET" and path == "/api/conversion/samples":
+                self._conversion_samples(parse_qs(split.query))
+            elif (
+                method == "POST"
+                and path.startswith("/api/conversion/samples/")
+                and path.endswith("/review")
+            ):
+                episode_id = path[
+                    len("/api/conversion/samples/") : -len("/review")
+                ].strip("/")
+                self._save_conversion_review(episode_id)
+            elif method == "GET" and path.startswith("/api/conversion/samples/"):
+                episode_id = path[len("/api/conversion/samples/") :].strip("/")
+                self._conversion_detail(episode_id)
             elif method == "GET" and path == "/api/profiles":
                 self._profiles(parse_qs(split.query))
             elif method == "GET" and path.startswith("/api/profiles/") and path.endswith("/messages"):
@@ -1043,6 +1066,18 @@ class ReviewPortalHandler(BaseHTTPRequestHandler):
                 raise PortalError(HTTPStatus.NOT_FOUND, "not_found", "页面接口不存在")
         except PortalError as error:
             self._error(error)
+        except ConversionReviewValidationError as error:
+            self._error(
+                PortalError(HTTPStatus.BAD_REQUEST, "invalid_conversion_review", str(error))
+            )
+        except ConversionReviewError as error:
+            self._error(
+                PortalError(
+                    HTTPStatus.SERVICE_UNAVAILABLE,
+                    "conversion_review_unavailable",
+                    str(error),
+                )
+            )
         except (BrokenPipeError, ConnectionResetError):
             return
         except Exception:
@@ -1060,6 +1095,52 @@ class ReviewPortalHandler(BaseHTTPRequestHandler):
         origin = self.headers.get("Origin", "").rstrip("/")
         if origin and origin not in {"http://" + host, "https://" + host}:
             raise PortalError(HTTPStatus.FORBIDDEN, "origin_denied", "跨站请求已拒绝")
+
+    def _conversion_service(self) -> ConversionReviewService:
+        service = self.server.conversion_review
+        if service is None:
+            raise PortalError(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                "conversion_review_unavailable",
+                "成交方法论审核数据尚未接入",
+            )
+        return service
+
+    def _conversion_summary(self) -> None:
+        self._send_json(HTTPStatus.OK, self._conversion_service().summary())
+
+    def _conversion_samples(self, query: Mapping[str, Sequence[str]]) -> None:
+        def integer(name: str, default: int) -> int:
+            raw = (query.get(name) or [str(default)])[0]
+            try:
+                return int(raw)
+            except (TypeError, ValueError) as exc:
+                raise ConversionReviewValidationError("分页参数无效") from exc
+
+        payload = self._conversion_service().list_samples(
+            status=(query.get("status") or [""])[0],
+            sample_state=(query.get("sample_state") or [""])[0],
+            signal=(query.get("signal") or [""])[0],
+            limit=integer("limit", 100),
+            offset=integer("offset", 0),
+        )
+        self._send_json(HTTPStatus.OK, payload)
+
+    def _conversion_detail(self, episode_id: str) -> None:
+        self._send_json(
+            HTTPStatus.OK,
+            self._conversion_service().detail(episode_id),
+        )
+
+    def _save_conversion_review(self, episode_id: str) -> None:
+        review = self._conversion_service().save_review(
+            episode_id,
+            self._read_json(),
+        )
+        self._send_json(
+            HTTPStatus.OK,
+            {"review": review, "weights_trained": False, "send_allowed": False},
+        )
 
     def _db(self, *, write: bool = False) -> sqlite3.Connection:
         if not self.server.db_path.is_file():
@@ -1693,6 +1774,8 @@ def create_server(
     allowed_hosts: Sequence[str] = (),
     customer_data_path: Optional[Path] = None,
     hmac_secret_path: Optional[Path] = None,
+    conversion_audit_dir: Optional[Path] = None,
+    conversion_db_path: Optional[Path] = None,
 ) -> ReviewPortalServer:
     resolved_db = Path(db_path).expanduser().resolve()
     _ensure_opening_review_schema(resolved_db)
@@ -1700,6 +1783,17 @@ def create_server(
         customer_data_path,
         hmac_secret_path,
     )
+    conversion_review = None
+    if conversion_audit_dir is not None or conversion_db_path is not None:
+        if conversion_audit_dir is None or conversion_db_path is None:
+            raise RuntimeError(
+                "conversion audit directory and conversion database must be configured together"
+            )
+        conversion_review = ConversionReviewService(
+            conversion_audit_dir,
+            conversion_db_path,
+            cleaner=_clean_text,
+        )
     hosts = {"127.0.0.1", "localhost", "localhost.localdomain", "::1", *allowed_hosts}
     return ReviewPortalServer(
         (host, int(port)),
@@ -1708,6 +1802,7 @@ def create_server(
         allowed_hosts=tuple(hosts),
         customer_index=customer_index,
         customer_source_synced_at=customer_source_synced_at,
+        conversion_review=conversion_review,
     )
 
 
@@ -1720,6 +1815,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--allowed-host", action="append", default=[])
     parser.add_argument("--customer-data", default=str(DEFAULT_CUSTOMER_DATA_PATH))
     parser.add_argument("--hmac-secret-file", default=str(DEFAULT_HMAC_SECRET_PATH))
+    parser.add_argument("--conversion-audit-dir", default="")
+    parser.add_argument("--conversion-db", default="")
     args = parser.parse_args(argv)
     server = create_server(
         args.host,
@@ -1729,6 +1826,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         allowed_hosts=args.allowed_host,
         customer_data_path=Path(args.customer_data),
         hmac_secret_path=Path(args.hmac_secret_file),
+        conversion_audit_dir=(
+            Path(args.conversion_audit_dir) if args.conversion_audit_dir else None
+        ),
+        conversion_db_path=Path(args.conversion_db) if args.conversion_db else None,
     )
     print("review portal listening on http://%s:%d" % server.server_address, flush=True)
     try:
