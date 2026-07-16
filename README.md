@@ -79,7 +79,22 @@ python3 -m wechat_cs build-action-queue \
 
 所有接口只返回匿名 `customer_key`，并固定返回 `send_allowed=false`。
 
-## 4. Plan 7 人工复核
+## 4. 成交归因样本审计
+
+在训练客户优先级或话术权重之前，先运行只读归因审计。它把同一手机号同一天的付款记录合并为一个购买事件，并将结果分为唯一跨日接触、同日相关、多次接触竞争、无匹配接触、身份未核验和订单质量不足。输出同时包含成交正样本、可比未成交样本和观察期未满样本；不会训练权重，也不会产生可发送消息。
+
+```bash
+python3 -m wechat_cs build-conversion-audit \
+  --db .wechat-cs/runs/<run-id>/wechat_cs_m0.sqlite3 \
+  --facts-db .wechat-cs/runs/<facts-run-id>/wechat_cs_m0.sqlite3 \
+  --history-facts-db .wechat-cs/runs/<history-run-id>/wechat_cs_m0.sqlite3 \
+  --as-of 2026-07-15T11:50:00+08:00 \
+  --output-dir .wechat-cs/analysis/conversion-attribution-v1
+```
+
+`--facts-db` 只在聊天快照比订单事实快照更新时使用；不传时两类数据读取同一个库。当前 Base 只覆盖部分历史时，可传 `--history-facts-db`，审计器会按匿名客户和付款日合并购买事件，避免按不一致的记录 ID 重复计数。所有输出都限制在项目的 `.wechat-cs/` 派生目录内，源数据库以只读方式打开。订单只有日期、没有可靠付款时分秒时，同日成交固定保留为相关性歧义，不进入方法学习。
+
+## 5. Plan 7 人工复核
 
 三个批次必须依次完成，后续阶段不会越过前一阶段：
 
@@ -95,7 +110,7 @@ python3 -m wechat_cs review-annotate \
 
 阶段名依次为 `protocol_20`、`acceptance_100`、`gold_500`。人工复核可以看到独立标记的实际回复，模型载荷会剔除它；付款、订单和结果字段不会被复核查询读取。
 
-## 5. 角色校准和样本审核
+## 6. 角色校准和样本审核
 
 角色校准必须完成全部 200 条且准确率达到 99%，之后才能安全导出训练集。审核通过的低风险风格样本才会进入起草检索。
 
@@ -108,13 +123,13 @@ python3 -m wechat_cs export-chatml \
 
 不要使用 `--include-pending`、`--allow-unverified-roles` 或 `--include-risky` 生成生产训练集；这些参数只用于隔离研究。
 
-## 6. 飞书知识缓存
+## 7. 飞书知识缓存
 
 复制并编辑 `config/knowledge_sources.example.json`。当前服务读取本地缓存文件，不会在请求时直接把整份飞书文档拉入模型。每个缓存需要包含采集时间和可检索条目；缺失或过期会显示在系统状态中。
 
 动态价格、库存、物流、退款或补发问题没有有效依据时，起草结果会带 `grounding_missing`、`needs_clarification` 和 `needs_human`。
 
-## 7. 安装到现有远端 Dashboard
+## 8. 安装到现有远端 Dashboard
 
 先在 Dashboard 主机上只做兼容性检查：
 
@@ -149,7 +164,7 @@ export WECHAT_CS_PRIVATE_MAP_PATH='/仅本机可读/customer-map.json'
 
 回滚时停止 Dashboard，恢复两个 `.before-wechat-cs` 备份，并移除 `wechat_cs_proxy.js` 与 `wechat-cs/` 目录。
 
-## 8. 验证
+## 9. 验证
 
 ```bash
 python3 -m py_compile wechat_cs/*.py

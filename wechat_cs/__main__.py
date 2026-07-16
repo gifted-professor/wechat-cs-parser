@@ -15,6 +15,7 @@ from .build import (
     build_live_inbox_database,
     export_chatml,
 )
+from .conversion_audit import build_conversion_audit
 from .core import DEFAULT_HMAC_SECRET
 from .identity import import_bindings, import_feishu_order_bindings
 from .orders import import_orders
@@ -145,6 +146,31 @@ def make_parser() -> argparse.ArgumentParser:
     )
     action_queue.add_argument("--profile", help="optional local profile such as aolai1")
 
+    conversion_audit = subparsers.add_parser(
+        "build-conversion-audit",
+        help="build a read-only order-to-contact attribution and learning-sample audit",
+    )
+    conversion_audit.add_argument("--db", required=True)
+    conversion_audit.add_argument(
+        "--facts-db",
+        help="optional read-only identity/order DB when the message DB is a newer snapshot",
+    )
+    conversion_audit.add_argument(
+        "--history-facts-db",
+        help="optional older read-only order DB merged at customer-day purchase-event grain",
+    )
+    conversion_audit.add_argument(
+        "--as-of",
+        required=True,
+        help="timezone-aware requested audit cutoff",
+    )
+    conversion_audit.add_argument(
+        "--output-dir",
+        default=".wechat-cs/analysis/conversion-attribution-v1",
+    )
+    conversion_audit.add_argument("--lookback-days", type=int, default=7)
+    conversion_audit.add_argument("--minimum-customers", type=int, default=30)
+
     review_batch = subparsers.add_parser(
         "review-batch",
         help="prepare one deterministic outcome-blind local human review batch",
@@ -270,6 +296,21 @@ def main(argv=None) -> int:
                     collector_status=args.collector_status,
                     profile_id=args.profile,
                     secret=os.environ.get("WECHAT_CS_HMAC_SECRET", DEFAULT_HMAC_SECRET),
+                )
+            )
+        elif args.command == "build-conversion-audit":
+            _print(
+                build_conversion_audit(
+                    Path(args.db),
+                    as_of_at=args.as_of,
+                    output_dir=Path(args.output_dir),
+                    facts_db_path=Path(args.facts_db) if args.facts_db else None,
+                    history_facts_db_path=(
+                        Path(args.history_facts_db) if args.history_facts_db else None
+                    ),
+                    lookback_days=args.lookback_days,
+                    minimum_customers=args.minimum_customers,
+                    project_root=Path.cwd(),
                 )
             )
         elif args.command == "review-batch":
