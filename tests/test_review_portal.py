@@ -386,7 +386,7 @@ class ReviewPortalTests(unittest.TestCase):
                     "customer-1",
                     "customer",
                     "2026-07-03T09:00:00+08:00",
-                    "有活动告诉我",
+                    "过两天再来问问看，有活动也告诉我",
                     "events.jsonl",
                     5,
                 ),
@@ -464,6 +464,8 @@ class ReviewPortalTests(unittest.TestCase):
         self.assertIn("历史订单", page)
         self.assertIn("客户跟进审核", page)
         self.assertIn("成交方法论审核", page)
+        self.assertIn("两天后回访", page)
+        self.assertIn("回访前准备", page)
         self.assertIn("历史相关性，不代表因果", page)
         self.assertNotIn("事实准确度", page)
         self.assertNotIn("访问码", page)
@@ -493,6 +495,11 @@ class ReviewPortalTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(detail["sample_state"], "non_converted_7d")
         self.assertTrue(detail["messages"])
+        self.assertTrue(detail["followup_method"]["detected"])
+        self.assertEqual(
+            detail["followup_method"]["recommended_action"],
+            "schedule_prepared_followup",
+        )
         self.assertNotIn("customer-1", json.dumps(detail, ensure_ascii=False))
 
         with sqlite3.connect(str(self.db_path)) as conn:
@@ -510,6 +517,8 @@ class ReviewPortalTests(unittest.TestCase):
                 "corrected_explicit_price_barrier": "",
                 "corrected_suspected_barrier": "",
                 "corrected_talk_track_primary": "",
+                "expected_followup_action": "schedule_prepared_followup",
+                "followup_preparation_note": "核对活动、价格和客户上次顾虑。",
                 "note": "标签和上下文一致。",
             },
         )
@@ -551,6 +560,49 @@ class ReviewPortalTests(unittest.TestCase):
         self.assertNotIn("13800138000", serialized_events)
         self.assertNotIn("message_abcdef", serialized_events)
         self.assertFalse(detail["send_allowed"])
+
+    def test_future_return_signal_can_be_saved_as_a_prepared_followup_plan(self) -> None:
+        status, detail = self.request("GET", "/api/profiles/sales-profile-1")
+        self.assertEqual(status, 200)
+        recommendation = detail["followup_recommendation"]
+        self.assertTrue(recommendation["detected"])
+        self.assertEqual(recommendation["recommended_action"], "schedule_prepared_followup")
+        self.assertTrue(
+            any("顾虑" in item for item in recommendation["preparation_checklist"])
+        )
+
+        status, saved = self.request(
+            "POST",
+            "/api/profiles/sales-profile-1/review",
+            self.valid_review(
+                followup_status="scheduled",
+                followup_due_on="2026-07-18",
+                followup_reason="客户说过几天再来问问看",
+                followup_preparation="核对最新活动和价格；准备符合历史偏好的两款商品。",
+            ),
+        )
+        self.assertEqual(status, 200)
+        review = saved["review"]
+        self.assertEqual(review["followup_status"], "scheduled")
+        self.assertEqual(review["followup_due_on"], "2026-07-18")
+        self.assertIn("历史偏好", review["followup_preparation"])
+
+        status, retried = self.request(
+            "POST", "/api/profiles/sales-profile-1/review", self.valid_review()
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(retried["review"]["followup_status"], "scheduled")
+        self.assertEqual(retried["review"]["followup_due_on"], "2026-07-18")
+
+        status, invalid = self.request(
+            "POST",
+            "/api/profiles/sales-profile-1/review",
+            self.valid_review(followup_status="scheduled", followup_due_on=""),
+        )
+        self.assertEqual(
+            (status, invalid["error"]["code"]),
+            (400, "missing_followup_due_on"),
+        )
 
     def test_high_aftersales_customer_is_excluded_and_eligible_list_is_score_sorted(self) -> None:
         status, summary = self.request("GET", "/api/summary")
@@ -799,13 +851,14 @@ class ReviewPortalTests(unittest.TestCase):
                 ).fetchone()
                 additions = conn.execute(
                     "SELECT priority_assessment,priority_reason_code,priority_note,"
-                    "evidence_message_ref,chat_snapshot_at,revision_notes "
+                    "evidence_message_ref,chat_snapshot_at,revision_notes,"
+                    "followup_status,followup_due_on,followup_reason,followup_preparation "
                     "FROM sales_profile_opening_reviews"
                 ).fetchone()
             finally:
                 conn.close()
             self.assertEqual(actual, legacy)
-            self.assertEqual(additions, ("", "", "", "", "", ""))
+            self.assertEqual(additions, ("", "", "", "", "", "", "", "", "", ""))
 
     def test_no_model_or_send_route(self) -> None:
         for path in ("/api/profiles/sales-profile-1/send", "/api/run", "/v1/sales-profile-pilot"):

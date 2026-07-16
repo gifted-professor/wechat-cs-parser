@@ -343,6 +343,22 @@ blockquote { margin: 9px 0 0; padding: 11px 13px; border-left: 3px solid #94bda5
 blockquote small { margin-right: 8px; color: var(--muted); }
 
 .review-panel { border-bottom: 0; background: #faf8f1; }
+.followup-plan, .method-followup-playbook {
+  margin: 0 0 18px; padding: 18px; display: grid; gap: 13px;
+  border: 1px solid #e3c486; border-radius: 14px; background: #fff9e9;
+}
+.followup-plan-head { display: flex; justify-content: space-between; gap: 14px; align-items: center; }
+.followup-plan-head span, .method-followup-playbook > div > span { color: #8a5d18; font-size: 11px; font-weight: 800; }
+.followup-plan h4, .method-followup-playbook h4 { margin: 3px 0 0; font-size: 16px; }
+.followup-plan p, .method-followup-playbook p { margin: 0; color: #665531; font-size: 13px; line-height: 1.65; }
+.followup-plan-fields, .method-followup-fields { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; }
+.followup-plan label, .method-followup-fields label { display: grid; gap: 6px; color: #4b514c; font-size: 12px; font-weight: 700; }
+.followup-checklist { display: flex; flex-wrap: wrap; gap: 7px; }
+.followup-checklist span { padding: 6px 9px; border-radius: 999px; background: #f3e7c7; color: #6b531c; font-size: 11px; }
+.method-followup-playbook { margin: 0; background: #f7f7f2; border-color: var(--line); }
+.method-followup-playbook.detected { background: #fff9e9; border-color: #e3c486; }
+.method-followup-fields { margin: 0 0 18px; padding: 16px; border-radius: 13px; background: #f3f6f2; }
+.method-followup-fields label:last-child { grid-column: 1 / -1; }
 .verdict-field { margin: 0 0 16px; padding: 0; display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; border: 0; }
 .verdict-field legend { margin-bottom: 10px; font-size: 13px; font-weight: 800; }
 .verdict-field label { display: block; }
@@ -430,7 +446,8 @@ footer { padding: 22px; color: var(--muted); font-size: 12px; text-align: center
   .value-hero { grid-template-columns: 1fr; }
   .priority-card, .value-metrics, .habit-strip { grid-column: auto; }
   .priority-card { min-height: 190px; }
-  .cross-sell-recommendations, .priority-options, .priority-reason-fields { grid-template-columns: 1fr; }
+  .cross-sell-recommendations, .priority-options, .priority-reason-fields, .followup-plan-fields, .method-followup-fields { grid-template-columns: 1fr; }
+  .method-followup-fields label:last-child { grid-column: auto; }
   .chat-message { width: 92%; }
   .value-metrics, .habit-strip, .card-grid, .verdict-field { grid-template-columns: 1fr; }
   .value-metrics article { border-right: 0; border-bottom: 1px solid var(--line); }

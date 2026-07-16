@@ -79,6 +79,10 @@ const methodLabels = {
   approved: '可纳入方法论',
   corrected: '修正后纳入',
   rejected: '排除样本',
+  schedule_prepared_followup: '记录日期并准备后回访',
+  wait_for_customer: '等待客户主动回来',
+  no_followup: '不需要回访',
+  handoff: '转人工处理',
 };
 
 const fieldLabels = {
@@ -323,6 +327,10 @@ function resetReviewForm() {
   $('#priorityReasonCode').value = '';
   $('#priorityNote').value = '';
   $('#revisionNotes').value = '';
+  $('#followupStatus').value = '';
+  $('#followupDueOn').value = '';
+  $('#followupReason').value = '';
+  $('#followupPreparation').value = '';
   setText('#priorityNoteCount', '0');
   setText('#revisionNotesCount', '0');
   $('#priorityReasonFields').classList.add('hidden');
@@ -332,9 +340,32 @@ function resetReviewForm() {
   setText('#saveStatus', '', '');
 }
 
+function renderFollowupPlan(recommendation = {}, review = null) {
+  const plan = $('#followupPlan');
+  const hasSavedPlan = Boolean(review?.followup_status);
+  plan.classList.toggle('hidden', !recommendation.detected && !hasSavedPlan);
+  if (plan.classList.contains('hidden')) return;
+  setText(
+    '#followupRecommendation',
+    recommendation.reason,
+    '先核对客户原话和最新聊天，再决定是否建立回访任务。',
+  );
+  const checklist = $('#followupChecklist');
+  checklist.replaceChildren();
+  (recommendation.preparation_checklist || []).forEach(item => {
+    checklist.append(element('span', '', `✓ ${item}`));
+  });
+  $('#followupStatus').value = review?.followup_status || '';
+  $('#followupDueOn').value = review?.followup_due_on || '';
+  $('#followupReason').value = review?.followup_reason || '';
+  $('#followupPreparation').value = review?.followup_preparation || '';
+  $('#followupInTwoDays').dataset.suggestedDueOn = recommendation.suggested_due_on || '';
+}
+
 function fillOwnReview(detail) {
   resetReviewForm();
   const review = (detail.reviews || [])[0];
+  renderFollowupPlan(detail.followup_recommendation || {}, review || null);
   if (!review) return;
   const verdict = document.querySelector(`[name="verdict"][value="${review.verdict}"]`);
   if (verdict) verdict.checked = true;
@@ -621,6 +652,12 @@ function fillConversionReview(detail) {
   };
   Object.entries(values).forEach(([id, value]) => { $(`#${id}`).value = value; });
   $('#methodReviewNote').value = review?.note || '';
+  $('#methodExpectedFollowupAction').value = review?.expected_followup_action
+    || (detail.followup_method?.detected ? 'schedule_prepared_followup' : '');
+  $('#methodFollowupPreparation').value = review?.followup_preparation_note
+    || (detail.followup_method?.detected
+      ? (detail.followup_method.preparation_checklist || []).join('；')
+      : '');
   setText('#methodReviewNoteCount', String($('#methodReviewNote').value.length));
   $('#methodCorrectionFields').classList.toggle('hidden', verdict !== 'corrected');
   setText('#methodSaveStatus', '', '');
@@ -665,6 +702,27 @@ function renderConversionDetail(detail) {
       messages.append(item);
     });
   }
+  const followup = detail.followup_method || {};
+  setText(
+    '#methodFollowupSignal',
+    followup.detected ? '已识别：客户给出延期或未来回访信号' : '本段未识别到明确延期约定',
+  );
+  setText(
+    '#methodFollowupTitle',
+    followup.action_label,
+    '先确认客户是否给出了未来时间点',
+  );
+  setText(
+    '#methodFollowupGuardrail',
+    followup.guardrail,
+    '没有明确时间点时，不要擅自承诺自动回访。',
+  );
+  const followupChecklist = $('#methodFollowupChecklist');
+  followupChecklist.replaceChildren();
+  (followup.preparation_checklist || []).forEach(item => {
+    followupChecklist.append(element('span', '', `✓ ${item}`));
+  });
+  $('#methodFollowupPlaybook').classList.toggle('detected', Boolean(followup.detected));
   fillConversionReview(detail);
 }
 
@@ -712,6 +770,8 @@ async function saveConversionReview(event) {
         corrected_explicit_price_barrier: verdict === 'corrected' ? $('#correctedPriceBarrier').value : '',
         corrected_suspected_barrier: verdict === 'corrected' ? $('#correctedSuspectedBarrier').value : '',
         corrected_talk_track_primary: verdict === 'corrected' ? $('#correctedTalkTrack').value : '',
+        expected_followup_action: $('#methodExpectedFollowupAction').value,
+        followup_preparation_note: $('#methodFollowupPreparation').value.trim(),
         note,
       }),
     });
@@ -1044,6 +1104,10 @@ async function saveReview(event) {
         priority_reason_code: priorityReasonCode,
         priority_note: $('#priorityNote').value.trim(),
         evidence_message_ref: state.selectedEvidenceRef,
+        followup_status: $('#followupStatus').value,
+        followup_due_on: $('#followupDueOn').value,
+        followup_reason: $('#followupReason').value.trim(),
+        followup_preparation: $('#followupPreparation').value.trim(),
       }),
     });
     setText('#saveStatus', '已保存，可继续验收下一位');
@@ -1087,6 +1151,17 @@ function boot() {
   });
   $('#methodReviewNote').addEventListener('input', () => {
     setText('#methodReviewNoteCount', String($('#methodReviewNote').value.length));
+  });
+  $('#followupInTwoDays').addEventListener('click', () => {
+    const suggested = $('#followupInTwoDays').dataset.suggestedDueOn;
+    const fallback = new Date(Date.now() + 2 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+    $('#followupStatus').value = 'scheduled';
+    $('#followupDueOn').value = suggested || fallback;
+    if (!$('#followupPreparation').value.trim()) {
+      $('#followupPreparation').value = Array.from(
+        $('#followupChecklist').querySelectorAll('span'),
+      ).map(item => item.textContent.replace(/^✓\s*/, '')).join('；');
+    }
   });
   $('#editOpening').addEventListener('click', () => showOpeningEditor());
   $('#chatPanel').addEventListener('toggle', () => {

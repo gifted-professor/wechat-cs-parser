@@ -38,10 +38,29 @@ TALK_TRACKS = frozenset(
     }
 )
 VERDICTS = frozenset({"approved", "corrected", "rejected"})
+FOLLOWUP_ACTIONS = frozenset(
+    {"", "schedule_prepared_followup", "wait_for_customer", "no_followup", "handoff"}
+)
 SIGNALS = frozenset(
     {"", "price_barrier", "quote_silence", "customer_initiated", "repeat_90d"}
 )
 REVIEW_STATUSES = frozenset({"", "pending", "reviewed"})
+FOLLOWUP_HOOK_PATTERNS = (
+    re.compile(
+        r"(?:过(?:一|两|几|\d+)天|[一二两三四五六七八九十\d]+天后|下周|改天|晚点|稍后|之后|月底|月初)"
+        r".{0,18}(?:再|来)?(?:问|联系|看看|看|买|拍)"
+    ),
+    re.compile(
+        r"(?:再来|再问|再联系|到时候问).{0,14}"
+        r"(?:过(?:一|两|几|\d+)天|[一二两三四五六七八九十\d]+天后|下周|月底|月初)"
+    ),
+)
+FOLLOWUP_PREPARATION_CHECKLIST = (
+    "客户上次的需求和顾虑",
+    "最新活动和价格",
+    "可推荐商品、款式和库存状态",
+    "到期时结合上次上下文的自然开场",
+)
 
 
 class ConversionReviewError(RuntimeError):
@@ -81,6 +100,8 @@ def _public_review(row: Optional[Mapping[str, Any]]) -> Optional[Dict[str, Any]]
         "corrected_explicit_price_barrier",
         "corrected_suspected_barrier",
         "corrected_talk_track_primary",
+        "expected_followup_action",
+        "followup_preparation_note",
         "note",
         "updated_at",
     )
@@ -173,6 +194,8 @@ class ConversionReviewService:
                     corrected_explicit_price_barrier TEXT NOT NULL DEFAULT '',
                     corrected_suspected_barrier TEXT NOT NULL DEFAULT '',
                     corrected_talk_track_primary TEXT NOT NULL DEFAULT '',
+                    expected_followup_action TEXT NOT NULL DEFAULT '',
+                    followup_preparation_note TEXT NOT NULL DEFAULT '',
                     note TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
@@ -182,6 +205,19 @@ class ConversionReviewService:
                     ON conversion_sample_reviews(updated_at DESC, episode_id);
                 """
             )
+            columns = {
+                str(row[1])
+                for row in connection.execute("PRAGMA table_info(conversion_sample_reviews)")
+            }
+            additions = (
+                ("expected_followup_action", "expected_followup_action TEXT NOT NULL DEFAULT ''"),
+                ("followup_preparation_note", "followup_preparation_note TEXT NOT NULL DEFAULT ''"),
+            )
+            for column, definition in additions:
+                if column not in columns:
+                    connection.execute(
+                        "ALTER TABLE conversion_sample_reviews ADD COLUMN " + definition
+                    )
             connection.commit()
         finally:
             connection.close()
@@ -193,7 +229,8 @@ class ConversionReviewService:
             rows = connection.execute(
                 "SELECT episode_id,verdict,corrected_origin,corrected_intent,"
                 "corrected_explicit_price_barrier,corrected_suspected_barrier,"
-                "corrected_talk_track_primary,note,updated_at "
+                "corrected_talk_track_primary,expected_followup_action,"
+                "followup_preparation_note,note,updated_at "
                 "FROM conversion_sample_reviews WHERE reviewer_key='operator-shared-workbench'"
             ).fetchall()
         finally:
@@ -356,6 +393,35 @@ class ConversionReviewService:
             for row in rows
         ]
 
+    @staticmethod
+    def _followup_method(messages: list[Mapping[str, Any]]) -> Dict[str, Any]:
+        evidence = []
+        for message in messages:
+            if message.get("role") != "customer":
+                continue
+            text = str(message.get("text") or "")
+            if any(pattern.search(text) for pattern in FOLLOWUP_HOOK_PATTERNS):
+                evidence.append(
+                    {
+                        "timestamp": message.get("timestamp"),
+                        "text": text,
+                    }
+                )
+        detected = bool(evidence)
+        return {
+            "detected": detected,
+            "signal": "future_followup_hook" if detected else "none",
+            "recommended_action": "schedule_prepared_followup" if detected else "",
+            "action_label": "记录日期，到期后准备充分地回访" if detected else "未发现明确延期约定",
+            "evidence": evidence[:3],
+            "preparation_checklist": list(FOLLOWUP_PREPARATION_CHECKLIST) if detected else [],
+            "guardrail": (
+                "未到约定时间不重复催促；回访前先核对最近聊天和最新业务事实。"
+                if detected
+                else ""
+            ),
+        }
+
     def detail(self, episode_id: str) -> Dict[str, Any]:
         if not IDENTIFIER.fullmatch(str(episode_id or "")):
             raise ConversionReviewValidationError("归因样本编号无效")
@@ -363,9 +429,11 @@ class ConversionReviewService:
         if item is None:
             raise ConversionReviewValidationError("归因样本不存在")
         review = self._review_rows().get(episode_id)
+        messages = self._messages(item)
         return {
             **self._public_sample(item, review),
-            "messages": self._messages(item),
+            "messages": messages,
+            "followup_method": self._followup_method(messages),
             "message_window": {
                 "kind": "ended_on_minus_7_days",
                 "note": "展示该回合结束日前 7 天的近似上下文，用于人工核对，不代表某句话导致成交。",
@@ -405,6 +473,16 @@ class ConversionReviewService:
             if verdict == "corrected" and value and value != str(item.get(source_field) or ""):
                 changed = True
         note = _plain_text(body.get("note"), limit=1000)
+        expected_followup_action = _plain_text(
+            body.get("expected_followup_action"), limit=80
+        )
+        if expected_followup_action not in FOLLOWUP_ACTIONS:
+            raise ConversionReviewValidationError("请选择有效的后续动作")
+        followup_preparation_note = _plain_text(
+            body.get("followup_preparation_note"), limit=1000
+        )
+        if expected_followup_action == "schedule_prepared_followup" and not followup_preparation_note:
+            raise ConversionReviewValidationError("预约回访时，请填写回访前准备")
         if verdict == "corrected" and not (changed or note):
             raise ConversionReviewValidationError("修正后纳入时，请修改标签或填写说明")
         now = datetime.now().astimezone().isoformat(timespec="seconds")
@@ -415,14 +493,17 @@ class ConversionReviewService:
                 connection.execute(
                     "INSERT INTO conversion_sample_reviews(episode_id,reviewer_key,audit_version,verdict,"
                     "corrected_origin,corrected_intent,corrected_explicit_price_barrier,"
-                    "corrected_suspected_barrier,corrected_talk_track_primary,note,created_at,updated_at) "
-                    "VALUES(?, 'operator-shared-workbench', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                    "corrected_suspected_barrier,corrected_talk_track_primary,"
+                    "expected_followup_action,followup_preparation_note,note,created_at,updated_at) "
+                    "VALUES(?, 'operator-shared-workbench', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                     "ON CONFLICT(episode_id,reviewer_key) DO UPDATE SET "
                     "audit_version=excluded.audit_version,verdict=excluded.verdict,"
                     "corrected_origin=excluded.corrected_origin,corrected_intent=excluded.corrected_intent,"
                     "corrected_explicit_price_barrier=excluded.corrected_explicit_price_barrier,"
                     "corrected_suspected_barrier=excluded.corrected_suspected_barrier,"
                     "corrected_talk_track_primary=excluded.corrected_talk_track_primary,"
+                    "expected_followup_action=excluded.expected_followup_action,"
+                    "followup_preparation_note=excluded.followup_preparation_note,"
                     "note=excluded.note,updated_at=excluded.updated_at",
                     (
                         episode_id,
@@ -433,6 +514,8 @@ class ConversionReviewService:
                         corrected["corrected_explicit_price_barrier"],
                         corrected["corrected_suspected_barrier"],
                         corrected["corrected_talk_track_primary"],
+                        expected_followup_action,
+                        followup_preparation_note,
                         note,
                         now,
                         now,
@@ -442,7 +525,8 @@ class ConversionReviewService:
                 row = connection.execute(
                     "SELECT verdict,corrected_origin,corrected_intent,"
                     "corrected_explicit_price_barrier,corrected_suspected_barrier,"
-                    "corrected_talk_track_primary,note,updated_at "
+                    "corrected_talk_track_primary,expected_followup_action,"
+                    "followup_preparation_note,note,updated_at "
                     "FROM conversion_sample_reviews WHERE episode_id=? "
                     "AND reviewer_key='operator-shared-workbench'",
                     (episode_id,),

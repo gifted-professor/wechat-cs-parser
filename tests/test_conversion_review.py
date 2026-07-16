@@ -95,7 +95,7 @@ class ConversionReviewServiceTests(unittest.TestCase):
                     "customer-price",
                     "customer",
                     "2026-07-10T09:00:00+08:00",
-                    "这个有点贵，电话 13800138000",
+                    "这个有点贵，我过几天再来问问看，电话 13800138000",
                     1,
                 ),
                 (
@@ -198,6 +198,12 @@ class ConversionReviewServiceTests(unittest.TestCase):
         detail = self.service.detail("episode-price-loss")
         self.assertEqual(len(detail["messages"]), 2)
         self.assertIn("[手机号已隐藏]", detail["messages"][0]["text"])
+        self.assertTrue(detail["followup_method"]["detected"])
+        self.assertEqual(
+            detail["followup_method"]["recommended_action"],
+            "schedule_prepared_followup",
+        )
+        self.assertIn("最新活动和价格", detail["followup_method"]["preparation_checklist"])
         self.assertNotIn("customer-price", json.dumps(detail, ensure_ascii=False))
         review = self.service.save_review(
             "episode-price-loss",
@@ -209,12 +215,16 @@ class ConversionReviewServiceTests(unittest.TestCase):
                 "corrected_explicit_price_barrier": "discount_request",
                 "corrected_suspected_barrier": "none",
                 "corrected_talk_track_primary": "price_quote",
+                "expected_followup_action": "schedule_prepared_followup",
+                "followup_preparation_note": "先核对最新活动、价格和上次嫌贵的顾虑。",
                 "note": "客户问优惠，不是明确说太贵。",
             },
         )
         self.assertEqual(review["verdict"], "corrected")
         stored = self.service.detail("episode-price-loss")["review"]
         self.assertEqual(stored["corrected_explicit_price_barrier"], "discount_request")
+        self.assertEqual(stored["expected_followup_action"], "schedule_prepared_followup")
+        self.assertIn("最新活动", stored["followup_preparation_note"])
         self.assertEqual(self.service.summary()["reviewed"], 1)
 
     def test_rejects_stale_versions_and_empty_corrections(self) -> None:

@@ -19,7 +19,7 @@ import re
 import sqlite3
 import threading
 import traceback
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -92,6 +92,17 @@ REVIEW_OPTIONAL_FIELDS = (
     "priority_note",
     "evidence_message_ref",
     "revision_notes",
+    "followup_status",
+    "followup_due_on",
+    "followup_reason",
+    "followup_preparation",
+)
+FOLLOWUP_STATUSES = frozenset({"", "scheduled", "completed", "cancelled"})
+FOLLOWUP_PREPARATION_CHECKLIST = (
+    "核对客户上次的需求和顾虑",
+    "核对最新活动、价格和可承诺范围",
+    "准备符合历史偏好的商品、款式和库存信息",
+    "用上次聊天上下文开场，不泛问“考虑得怎么样”",
 )
 
 EVIDENCE_FIELD_LABELS = {
@@ -292,6 +303,10 @@ def _ensure_opening_review_schema(db_path: Path) -> None:
                 evidence_message_ref TEXT NOT NULL DEFAULT '',
                 chat_snapshot_at TEXT NOT NULL DEFAULT '',
                 revision_notes TEXT NOT NULL DEFAULT '',
+                followup_status TEXT NOT NULL DEFAULT '',
+                followup_due_on TEXT NOT NULL DEFAULT '',
+                followup_reason TEXT NOT NULL DEFAULT '',
+                followup_preparation TEXT NOT NULL DEFAULT '',
                 reviewer_key TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
@@ -318,6 +333,10 @@ def _ensure_opening_review_schema(db_path: Path) -> None:
             ("evidence_message_ref", "evidence_message_ref TEXT NOT NULL DEFAULT ''"),
             ("chat_snapshot_at", "chat_snapshot_at TEXT NOT NULL DEFAULT ''"),
             ("revision_notes", "revision_notes TEXT NOT NULL DEFAULT ''"),
+            ("followup_status", "followup_status TEXT NOT NULL DEFAULT ''"),
+            ("followup_due_on", "followup_due_on TEXT NOT NULL DEFAULT ''"),
+            ("followup_reason", "followup_reason TEXT NOT NULL DEFAULT ''"),
+            ("followup_preparation", "followup_preparation TEXT NOT NULL DEFAULT ''"),
         )
         for column, definition in additions:
             if column not in columns:
@@ -813,6 +832,21 @@ def _public_event(row: Mapping[str, Any]) -> Dict[str, Any]:
 
 
 def _public_review(row: Mapping[str, Any]) -> Dict[str, Any]:
+    followup_status = str(row.get("followup_status") or "")
+    followup_due_on = str(row.get("followup_due_on") or "")
+    due_state = ""
+    if followup_status == "completed":
+        due_state = "completed"
+    elif followup_status == "cancelled":
+        due_state = "cancelled"
+    elif followup_status == "scheduled" and followup_due_on:
+        try:
+            due_day = date.fromisoformat(followup_due_on)
+        except ValueError:
+            due_state = "invalid"
+        else:
+            today = datetime.now().astimezone().date()
+            due_state = "overdue" if due_day < today else ("today" if due_day == today else "upcoming")
     return {
         "review_id": row.get("review_id"),
         "card_version": row.get("card_version"),
@@ -825,7 +859,36 @@ def _public_review(row: Mapping[str, Any]) -> Dict[str, Any]:
         "evidence_message_ref": row.get("evidence_message_ref") or "",
         "chat_snapshot_at": row.get("chat_snapshot_at") or "",
         "revision_notes": _clean_text(row.get("revision_notes")),
+        "followup_status": followup_status,
+        "followup_due_on": followup_due_on,
+        "followup_due_state": due_state,
+        "followup_reason": _clean_text(row.get("followup_reason")),
+        "followup_preparation": _clean_text(row.get("followup_preparation")),
         "updated_at": row.get("updated_at"),
+    }
+
+
+def _followup_recommendation(event_types: set[str]) -> Dict[str, Any]:
+    detected = bool(event_types & FUTURE_EVENT_TYPES)
+    return {
+        "detected": detected,
+        "recommended_action": "schedule_prepared_followup" if detected else "",
+        "suggested_due_on": (
+            (datetime.now().astimezone() + timedelta(days=2)).date().isoformat()
+            if detected
+            else ""
+        ),
+        "reason": (
+            "客户表达了稍后、过几天、等活动或等条件满足后再看的意向。"
+            if detected
+            else ""
+        ),
+        "preparation_checklist": list(FOLLOWUP_PREPARATION_CHECKLIST) if detected else [],
+        "guardrail": (
+            "先核对最近聊天；若客户已有新回复、已购买或明确拒绝联系，应完成或取消任务。"
+            if detected
+            else ""
+        ),
     }
 
 
@@ -877,11 +940,17 @@ def _validate_review(body: Any) -> Dict[str, Any]:
             "选择该结论时，请写出更合适的开场",
         )
     optional_values: Dict[str, str] = {}
+    optional_limits = {
+        "revision_notes": 2000,
+        "priority_note": 100,
+        "followup_reason": 500,
+        "followup_preparation": 2000,
+    }
     for field in REVIEW_OPTIONAL_FIELDS:
         if field not in body:
             continue
         value = str(body.get(field) or "").strip()
-        limit = 2000 if field == "revision_notes" else (100 if field == "priority_note" else 256)
+        limit = optional_limits.get(field, 256)
         if len(value) > limit or any(
             ord(char) < 32 and char not in "\n\r\t" for char in value
         ):
@@ -897,6 +966,29 @@ def _validate_review(body: Any) -> Dict[str, Any]:
             HTTPStatus.BAD_REQUEST,
             "invalid_priority_assessment",
             "请选择有效的优先级判断",
+        )
+    followup_status = optional_values.get("followup_status")
+    if followup_status is not None and followup_status not in FOLLOWUP_STATUSES:
+        raise PortalError(
+            HTTPStatus.BAD_REQUEST,
+            "invalid_followup_status",
+            "请选择有效的回访状态",
+        )
+    followup_due_on = optional_values.get("followup_due_on", "")
+    if followup_due_on:
+        try:
+            date.fromisoformat(followup_due_on)
+        except ValueError as exc:
+            raise PortalError(
+                HTTPStatus.BAD_REQUEST,
+                "invalid_followup_due_on",
+                "回访日期格式无效",
+            ) from exc
+    if followup_status == "scheduled" and not followup_due_on:
+        raise PortalError(
+            HTTPStatus.BAD_REQUEST,
+            "missing_followup_due_on",
+            "预约回访时，请选择回访日期",
         )
     return {
         "card_version": card_version,
@@ -1484,7 +1576,8 @@ class ReviewPortalHandler(BaseHTTPRequestHandler):
             review_rows = conn.execute(
                 "SELECT review_id,card_version,verdict,source_opening,suggested_opening,"
                 "priority_assessment,priority_reason_code,priority_note,evidence_message_ref,"
-                "chat_snapshot_at,revision_notes,updated_at "
+                "chat_snapshot_at,revision_notes,followup_status,followup_due_on,"
+                "followup_reason,followup_preparation,updated_at "
                 "FROM sales_profile_opening_reviews WHERE sales_profile_id=? AND reviewer_key=? "
                 "ORDER BY updated_at DESC,review_id DESC",
                 (profile_id, SHARED_REVIEWER_KEY),
@@ -1530,6 +1623,7 @@ class ReviewPortalHandler(BaseHTTPRequestHandler):
                 "order_history": order_history,
                 "events": [_public_event(item) for item in event_dicts],
                 "reviews": [_public_review(dict(item)) for item in review_rows],
+                "followup_recommendation": _followup_recommendation(event_types),
                 "cross_sell": cross_sell,
                 "inventory_assumption": "默认满库存",
                 "send_allowed": False,
@@ -1552,7 +1646,8 @@ class ReviewPortalHandler(BaseHTTPRequestHandler):
                     raise PortalError(HTTPStatus.CONFLICT, "card_version_conflict", "卡片已更新，请刷新后重新审核")
                 existing = conn.execute(
                     "SELECT card_version,priority_assessment,priority_reason_code,priority_note,"
-                    "evidence_message_ref,revision_notes FROM sales_profile_opening_reviews "
+                    "evidence_message_ref,revision_notes,followup_status,followup_due_on,"
+                    "followup_reason,followup_preparation FROM sales_profile_opening_reviews "
                     "WHERE sales_profile_id=? AND reviewer_key=?",
                     (profile_id, SHARED_REVIEWER_KEY),
                 ).fetchone()
@@ -1599,6 +1694,29 @@ class ReviewPortalHandler(BaseHTTPRequestHandler):
                         "missing_priority_reason",
                         "调整优先级时，请选择原因",
                     )
+                followup_status = priority_feedback["followup_status"]
+                followup_due_on = priority_feedback["followup_due_on"]
+                if followup_status not in FOLLOWUP_STATUSES:
+                    raise PortalError(
+                        HTTPStatus.BAD_REQUEST,
+                        "invalid_followup_status",
+                        "请选择有效的回访状态",
+                    )
+                if followup_due_on:
+                    try:
+                        date.fromisoformat(followup_due_on)
+                    except ValueError as exc:
+                        raise PortalError(
+                            HTTPStatus.BAD_REQUEST,
+                            "invalid_followup_due_on",
+                            "回访日期格式无效",
+                        ) from exc
+                if followup_status == "scheduled" and not followup_due_on:
+                    raise PortalError(
+                        HTTPStatus.BAD_REQUEST,
+                        "missing_followup_due_on",
+                        "预约回访时，请选择回访日期",
+                    )
                 card = _json(row["profile_json"], {})
                 identity = self.server.customer_index.get(str(row["phone_hmac"] or ""), {})
                 customer_name = str(identity.get("name") or "")
@@ -1621,6 +1739,14 @@ class ReviewPortalHandler(BaseHTTPRequestHandler):
                 )[:100]
                 revision_notes = _opening_for_storage(
                     priority_feedback["revision_notes"],
+                    customer_name=customer_name,
+                )[:2000]
+                followup_reason = _opening_for_storage(
+                    priority_feedback["followup_reason"],
+                    customer_name=customer_name,
+                )[:500]
+                followup_preparation = _opening_for_storage(
+                    priority_feedback["followup_preparation"],
                     customer_name=customer_name,
                 )[:2000]
                 if body["verdict"] == "approved":
@@ -1668,8 +1794,10 @@ class ReviewPortalHandler(BaseHTTPRequestHandler):
                 conn.execute(
                     "INSERT INTO sales_profile_opening_reviews(review_id,sales_profile_id,card_version,verdict,"
                     "source_opening,suggested_opening,priority_assessment,priority_reason_code,"
-                    "priority_note,evidence_message_ref,chat_snapshot_at,revision_notes,reviewer_key,created_at,updated_at) "
-                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(sales_profile_id,reviewer_key) DO UPDATE SET "
+                    "priority_note,evidence_message_ref,chat_snapshot_at,revision_notes,"
+                    "followup_status,followup_due_on,followup_reason,followup_preparation,"
+                    "reviewer_key,created_at,updated_at) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(sales_profile_id,reviewer_key) DO UPDATE SET "
                     "card_version=excluded.card_version,verdict=excluded.verdict,"
                     "source_opening=excluded.source_opening,suggested_opening=excluded.suggested_opening,"
                     "priority_assessment=excluded.priority_assessment,"
@@ -1678,6 +1806,10 @@ class ReviewPortalHandler(BaseHTTPRequestHandler):
                     "evidence_message_ref=excluded.evidence_message_ref,"
                     "chat_snapshot_at=excluded.chat_snapshot_at,"
                     "revision_notes=excluded.revision_notes,"
+                    "followup_status=excluded.followup_status,"
+                    "followup_due_on=excluded.followup_due_on,"
+                    "followup_reason=excluded.followup_reason,"
+                    "followup_preparation=excluded.followup_preparation,"
                     "updated_at=excluded.updated_at",
                     (
                         review_id,
@@ -1692,6 +1824,10 @@ class ReviewPortalHandler(BaseHTTPRequestHandler):
                         evidence_message_ref,
                         chat_snapshot_at,
                         revision_notes,
+                        followup_status,
+                        followup_due_on,
+                        followup_reason,
+                        followup_preparation,
                         SHARED_REVIEWER_KEY,
                         now,
                         now,
@@ -1701,7 +1837,8 @@ class ReviewPortalHandler(BaseHTTPRequestHandler):
                 stored = conn.execute(
                     "SELECT review_id,card_version,verdict,source_opening,suggested_opening,"
                     "priority_assessment,priority_reason_code,priority_note,evidence_message_ref,"
-                    "chat_snapshot_at,revision_notes,updated_at "
+                    "chat_snapshot_at,revision_notes,followup_status,followup_due_on,"
+                    "followup_reason,followup_preparation,updated_at "
                     "FROM sales_profile_opening_reviews WHERE sales_profile_id=? AND reviewer_key=?",
                     (profile_id, SHARED_REVIEWER_KEY),
                 ).fetchone()

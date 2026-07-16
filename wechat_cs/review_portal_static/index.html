@@ -169,6 +169,33 @@
               <form id="reviewForm" class="decision-review">
                 <div class="flow-stage-heading"><span>第三步</span><div><h4>留下你的判断</h4><p>验收开场，也可以纠正客户的促单优先级</p></div></div>
 
+                <section id="followupPlan" class="followup-plan hidden">
+                  <div class="followup-plan-head">
+                    <div><span>延期意向已识别</span><h4>把“过几天再问”记成可执行的回访计划</h4></div>
+                    <button id="followupInTwoDays" class="secondary" type="button">两天后回访</button>
+                  </div>
+                  <p id="followupRecommendation">先核对客户原话，再确定合适的回访日期。</p>
+                  <div id="followupChecklist" class="followup-checklist"></div>
+                  <div class="followup-plan-fields">
+                    <label>任务状态
+                      <select id="followupStatus">
+                        <option value="">暂不建立任务</option>
+                        <option value="scheduled">待回访</option>
+                        <option value="completed">已完成</option>
+                        <option value="cancelled">已取消</option>
+                      </select>
+                    </label>
+                    <label>回访日期<input id="followupDueOn" type="date"></label>
+                  </div>
+                  <label>记录客户为什么要晚点再看
+                    <textarea id="followupReason" rows="2" maxlength="500" placeholder="例如：客户说过几天再来问，当前主要顾虑是价格。"></textarea>
+                  </label>
+                  <label>回访前准备
+                    <textarea id="followupPreparation" rows="4" maxlength="2000" placeholder="核对上次顾虑、最新活动和价格、可推荐商品与库存状态；准备一条结合上次上下文的自然开场。"></textarea>
+                  </label>
+                  <small>这里只保存人工待办；到期不会自动发送消息。</small>
+                </section>
+
                 <label class="revision-notes-field">除了开场，这个客户画像或推荐还要怎么改？<small>可选</small>
                   <textarea id="revisionNotes" name="revision_notes" rows="4" maxlength="2000" placeholder="例如：不需要问是否顺利收到；可以人工推荐亚麻短裤搭配，但如果订单数据没有共同购买记录，要标明这是搭配建议，不是数据结论。"></textarea>
                   <span><b id="revisionNotesCount">0</b> / 2000 字</span>
@@ -331,8 +358,31 @@
             </section>
 
             <section class="method-review-section">
-              <div class="section-heading"><span>03</span><div><h3>人工审核结论</h3><p>只有人工确认的数据，后续才允许进入方法论统计</p></div></div>
+              <div class="section-heading"><span>03</span><div><h3>延期意向对应动作</h3><p>发现“过几天再问”时，不要只打标签，要形成可执行的回访方法</p></div></div>
+              <article id="methodFollowupPlaybook" class="method-followup-playbook">
+                <div><span id="methodFollowupSignal">正在核对延期信号</span><h4 id="methodFollowupTitle">先确认客户是否给出了未来时间点</h4></div>
+                <p id="methodFollowupGuardrail">未到约定时间不重复催促；到期前先准备充分。</p>
+                <div id="methodFollowupChecklist" class="followup-checklist"></div>
+              </article>
+            </section>
+
+            <section class="method-review-section">
+              <div class="section-heading"><span>04</span><div><h3>人工审核结论</h3><p>只有人工确认的数据，后续才允许进入方法论统计</p></div></div>
               <form id="methodReviewForm" class="decision-review">
+                <div class="method-followup-fields">
+                  <label>这类情况下一步应该怎么做？
+                    <select id="methodExpectedFollowupAction">
+                      <option value="">未判断</option>
+                      <option value="schedule_prepared_followup">记录日期并准备后回访</option>
+                      <option value="wait_for_customer">等待客户主动回来</option>
+                      <option value="no_followup">不需要回访</option>
+                      <option value="handoff">转人工处理</option>
+                    </select>
+                  </label>
+                  <label>回访前需要准备什么？
+                    <textarea id="methodFollowupPreparation" rows="3" maxlength="1000" placeholder="例如：核对最新活动和价格，准备符合客户偏好的两款商品，并带上次顾虑自然开场。"></textarea>
+                  </label>
+                </div>
                 <fieldset class="verdict-field method-verdict-field">
                   <legend>这条样本如何处理？</legend>
                   <label><input type="radio" name="method_verdict" value="approved" required><span><b>可纳入方法论</b><small>标签与聊天上下文一致</small></span></label>
