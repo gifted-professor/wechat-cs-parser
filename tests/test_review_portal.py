@@ -459,6 +459,141 @@ class ReviewPortalTests(unittest.TestCase):
         payload.update(overrides)
         return payload
 
+    def seed_additional_sales_run(self) -> None:
+        later = "2026-07-14T20:14:37+08:00"
+        conn = sqlite3.connect(str(self.db_path))
+        try:
+            conn.execute("PRAGMA foreign_keys = ON")
+            conn.execute(
+                "INSERT INTO sales_profile_runs(sales_profile_run_id,source_run_id,as_of_at,status,model,prompt_version,"
+                "profile_schema_version,sampling_version,message_snapshot_id,order_snapshot_id,cohort_hash,config_json,counts_json,quality_json,"
+                "created_at,started_at,completed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    "sales-run-new",
+                    "source-run",
+                    later,
+                    "complete",
+                    "gpt-5.5",
+                    "events-v4",
+                    "card-v4",
+                    "sampling-v2",
+                    "snapshot",
+                    "orders-snapshot",
+                    "cohort-new",
+                    "{}",
+                    "{}",
+                    "{}",
+                    later,
+                    later,
+                    later,
+                ),
+            )
+            conn.execute(
+                "INSERT INTO customers(customer_key,display_name,last_active_at,opportunity_score,opportunity_level,"
+                "summary,reasons_json,evidence_json,memory_json,source_file) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                ("customer-4", "客户-4", later, 70, "medium", "测试", "[]", "[]", "{}", "fixture"),
+            )
+            fixtures = (
+                (
+                    "subject-new-duplicate",
+                    "customer-1",
+                    "account-1",
+                    global_phone_hmac(HMAC_SECRET, "13800138000"),
+                    "high_value",
+                    1,
+                    "sales-profile-new-duplicate",
+                    False,
+                ),
+                (
+                    "subject-new-person",
+                    "customer-4",
+                    "account-4",
+                    global_phone_hmac(HMAC_SECRET, "13600136000"),
+                    "control",
+                    1,
+                    "sales-profile-new-person",
+                    False,
+                ),
+            )
+            for subject_id, customer_key, profile_id, phone_hmac, stratum, rank, sales_profile_id, blocked in fixtures:
+                conn.execute(
+                    "INSERT INTO sales_profile_subjects(subject_id,sales_profile_run_id,customer_key,profile_id,phone_hmac,"
+                    "stratum,stratum_rank,selection_reason_json,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,'{}',?,?,?)",
+                    (subject_id, "sales-run-new", customer_key, profile_id, phone_hmac, stratum, rank, "succeeded", later, later),
+                )
+                card = {
+                    "customer_value": {"summary": "新版客户画像", "facts": ["新版事实"]},
+                    "time_rhythm": {"best_contact_time": "晚间联系"},
+                    "current_opportunity": {"summary": "新版机会"},
+                    "natural_opening": "晚上好，新版开场。",
+                }
+                conn.execute(
+                    "INSERT INTO sales_profiles(sales_profile_id,subject_id,status,input_hash,idempotency_key,model,prompt_version,"
+                    "profile_schema_version,card_version,deterministic_facts_json,profile_json,evidence_json,error_json,created_at,updated_at) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        sales_profile_id,
+                        subject_id,
+                        "succeeded",
+                        "input-" + sales_profile_id,
+                        "idem-" + sales_profile_id,
+                        "gpt-5.5",
+                        "events-v4",
+                        "card-v4",
+                        "card-version-" + sales_profile_id,
+                        json.dumps(self._facts(blocked=blocked), ensure_ascii=False),
+                        json.dumps(card, ensure_ascii=False),
+                        "[]",
+                        "{}",
+                        later,
+                        later,
+                    ),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def test_all_runs_merge_people_and_keep_reviewed_version_canonical(self) -> None:
+        status, _ = self.request(
+            "POST", "/api/profiles/sales-profile-1/review", self.valid_review()
+        )
+        self.assertEqual(status, 200)
+        self.seed_additional_sales_run()
+        self.server.run_id = "all"
+
+        status, summary = self.request("GET", "/api/summary")
+        self.assertEqual(status, 200)
+        self.assertEqual(summary["run"]["sales_profile_run_id"], "all")
+        self.assertEqual(summary["batch_count"], 2)
+        self.assertEqual(summary["profile_versions"], 5)
+        self.assertEqual(summary["total"], 4)
+        self.assertEqual(summary["reviewed"], 1)
+
+        status, listing = self.request("GET", "/api/profiles?promotion=all")
+        self.assertEqual(status, 200)
+        duplicate = next(item for item in listing["items"] if item["phone_hint"] == "138****8000")
+        self.assertEqual(duplicate["sales_profile_id"], "sales-profile-1")
+        self.assertEqual(duplicate["version_count"], 2)
+        self.assertEqual(duplicate["review_count"], 1)
+        self.assertNotIn(
+            "sales-profile-new-duplicate",
+            [item["sales_profile_id"] for item in listing["items"]],
+        )
+
+        status, detail = self.request("GET", "/api/profiles/sales-profile-1")
+        self.assertEqual(status, 200)
+        self.assertEqual(detail["canonical_profile_id"], "sales-profile-1")
+        self.assertEqual(len(detail["versions"]), 2)
+        self.assertTrue(detail["versions"][0]["reviewed"])
+        self.assertEqual(detail["versions"][0]["sales_profile_id"], "sales-profile-1")
+
+        status, newer_detail = self.request(
+            "GET", "/api/profiles/sales-profile-new-duplicate"
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(newer_detail["canonical_profile_id"], "sales-profile-1")
+        self.assertEqual(newer_detail["reviews"], [])
+
     def test_no_access_code_and_host_boundary(self) -> None:
         status, page = self.request("GET", "/")
         self.assertEqual(status, 200)

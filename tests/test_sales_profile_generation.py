@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from wechat_cs.kimi_client import KimiSchemaError
 from wechat_cs.sales_profile_generation import (
+    _client_for_provider,
     _validate_card,
     _load_deterministic_facts,
     _stage_temperature,
@@ -283,6 +284,30 @@ class EventValidationTests(unittest.TestCase):
 
 
 class SalesProfileGenerationTests(unittest.TestCase):
+    def test_cpa_provider_uses_local_openai_compatible_gateway(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "CLIPROXYAPI_BASE_URL": "http://127.0.0.1:8317/",
+                "CLIPROXYAPI_API_KEY": "local-test-key",
+            },
+        ):
+            client = _client_for_provider("cliproxyapi")
+        self.assertEqual(client.base_url, "http://127.0.0.1:8317/v1")
+        self.assertEqual(client.api_key, "local-test-key")
+
+    def test_generation_canary_limit_is_bounded_before_database_access(self) -> None:
+        for value in (0, 101):
+            with self.subTest(value=value), self.assertRaisesRegex(
+                ValueError, "max_subjects"
+            ):
+                run_sales_profile_pilot(
+                    Path("missing.sqlite3"),
+                    events_path=Path("events.jsonl"),
+                    accounts_path=Path("accounts.json"),
+                    max_subjects=value,
+                )
+
     def _database(self, root: Path) -> tuple[Path, tuple[str, str]]:
         created = initialize_m0_run(
             runs_dir=root / ".wechat-cs" / "runs",
@@ -682,6 +707,14 @@ class SalesProfileGenerationTests(unittest.TestCase):
                     }
                 ],
             )
+            business = facts["business_context"]
+            self.assertEqual(business["pricing"]["default_wechat_margin"], 0.40)
+            self.assertEqual(
+                business["inventory"]["live_source"]["view_id"], "vew11gliHY"
+            )
+            self.assertIn("人工确认", business["human_confirmation"]["color"])
+            self.assertIn("退货率", business["product_selection"]["primary"])
+            self.assertIn("贬义标签", business["customer_assessment"]["evidence_gate"])
 
     def test_missing_api_key_stops_before_run_state_changes(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

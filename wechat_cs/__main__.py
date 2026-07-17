@@ -145,7 +145,7 @@ def make_parser() -> argparse.ArgumentParser:
 
     prepare_sales_profile = subparsers.add_parser(
         "prepare-sales-profile-pilot",
-        help="freeze the deterministic 50-person review cohort without calling Kimi",
+        help="freeze one deterministic sales-profile review cohort without calling a model",
     )
     prepare_sales_profile.add_argument("--db", required=True)
     prepare_sales_profile.add_argument(
@@ -161,6 +161,16 @@ def make_parser() -> argparse.ArgumentParser:
     prepare_sales_profile.add_argument(
         "--model", default=DEFAULT_SALES_PROFILE_MODEL
     )
+    prepare_sales_profile.add_argument(
+        "--provider", choices=("kimi", "cliproxyapi"), default="kimi"
+    )
+    prepare_sales_profile.add_argument(
+        "--subject-count", type=int, choices=(50, 100), default=50
+    )
+    prepare_sales_profile.add_argument("--all-remaining", action="store_true")
+    prepare_sales_profile.add_argument(
+        "--exclude-run-id", action="append", default=[]
+    )
 
     run_sales_profile = subparsers.add_parser(
         "run-sales-profile-pilot",
@@ -172,6 +182,7 @@ def make_parser() -> argparse.ArgumentParser:
     run_sales_profile.add_argument("--run-id", default="latest")
     run_sales_profile.add_argument("--resume", action="store_true")
     run_sales_profile.add_argument("--concurrency", type=int, default=2)
+    run_sales_profile.add_argument("--limit", type=int, choices=range(1, 101))
 
     action_queue = subparsers.add_parser(
         "build-action-queue",
@@ -324,6 +335,10 @@ def main(argv=None) -> int:
                     as_of_at=args.as_of,
                     source_run_id=args.source_run,
                     model=args.model,
+                    provider=args.provider,
+                    subject_count=args.subject_count,
+                    all_remaining=args.all_remaining,
+                    exclude_run_ids=args.exclude_run_id,
                     secret=os.environ.get(
                         "WECHAT_CS_HMAC_SECRET", DEFAULT_HMAC_SECRET
                     ),
@@ -338,6 +353,7 @@ def main(argv=None) -> int:
                     sales_profile_run_id=args.run_id,
                     resume=args.resume,
                     concurrency=args.concurrency,
+                    max_subjects=args.limit,
                     secret=os.environ.get(
                         "WECHAT_CS_HMAC_SECRET", DEFAULT_HMAC_SECRET
                     ),

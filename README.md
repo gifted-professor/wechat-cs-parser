@@ -118,6 +118,44 @@ python3 -m wechat_cs run-sales-profile-pilot \
 
 试点结果只进入“50 人画像验收”，不写回客户记忆，也没有自动发送能力。每张历史画像都必须在联系前核对最新状态。
 
+若要在不覆盖正式 50 人批次的前提下扩到新的 100 人，可冻结独立的 CPA GPT 批次。当前批准的 100 人分层为复杂风险 10、未来回访/等待 10、高频 25、高价值 25、沉睡复购 20、普通对照 10；`--exclude-run-id` 会从候选池排除原批次客户。CPA 仍是上游模型网关，模型输入沿用原销售画像链路，结果继续处于人工验收状态：
+
+```bash
+python3 -m wechat_cs prepare-sales-profile-pilot \
+  --db /absolute/path/to/run.sqlite3 \
+  --provider cliproxyapi \
+  --model gpt-5.5 \
+  --subject-count 100 \
+  --exclude-run-id sales-profile-run_cb162cd9b6ce9c532b1c8e59
+
+# 先处理 3 人 canary；通过后再次运行且不传 --limit，处理剩余 pending 项。
+python3 -m wechat_cs run-sales-profile-pilot \
+  --db /absolute/path/to/run.sqlite3 \
+  --events /absolute/path/to/events.jsonl \
+  --accounts-config /absolute/path/to/accounts.local.json \
+  --run-id 新批次ID \
+  --concurrency 2 \
+  --limit 3
+```
+
+CPA 默认连接 `http://127.0.0.1:8317/v1`，本机网关令牌默认使用 `cliproxyapi-local`；需要时可通过 `CLIPROXYAPI_BASE_URL` 和 `CLIPROXYAPI_API_KEY` 覆盖。数据库会记录 `provider=cliproxyapi` 与精确模型名，避免把 CPA GPT 误记成 Kimi。
+
+画像综合提示词固定带入当前业务口径：厂家默认持续供货、记录代表商品类型而非单件或具体 SKU；颜色和尺码必须人工确认；实际报价前查询飞书“单号查询 / 库存表”的实时商品信息。微信默认以 40% 毛利为报价基准，人工可在 30%-40% 毛利区间结合客户平均客单价调整，老客户例外仍需人工决定；商品选择优先看退货率，退货率接近时再看成本。模型只可依据历史证据中性判断成交爽快度、价格敏感和议价倾向，不得把默认库存、经验尺码、价格公式或 SOP 假设写成具体客户/商品事实，也不得编造清仓、稀缺、发票原因或优惠。
+
+完成分层试点后，可以用 `--all-remaining` 冻结所有仍符合条件且未进入指定历史批次的客户。全量模式按 `phone_hmac` 去重，同一人在多个账号下只保留一张画像；它不使用人为配额，仍按现有风险/等待/沉睡/高频/普通层保存，运行配置会明确记录 `all_remaining=true`：
+
+```bash
+python3 -m wechat_cs prepare-sales-profile-pilot \
+  --db /absolute/path/to/run.sqlite3 \
+  --provider cliproxyapi \
+  --model gpt-5.5 \
+  --all-remaining \
+  --exclude-run-id 原50人批次 \
+  --exclude-run-id CPA100人批次
+```
+
+CPA 是本地上游网关，不是离线免费推理。模型调用会消耗其背后账号的输入、输出 token 或订阅额度；逐人结果会原子落盘，正常运行只处理 `pending`，`--resume` 只重跑 `failed`。
+
 `review_portal` 是内部客服工作台，不是外部匿名评审门户。它会在详情页展示本地解析的客户姓名、完整手机号、历史订单、冻结批次内的去敏文字聊天，以及基于有效订单计算的连带购买样本；当前不设置访问码，因此只能绑定在受控内网或 Tailscale 私网地址，禁止监听公网地址或做公网映射。姓名和手机号只在本地展示边缘从 Dashboard 客户资料解析，不会写回画像或模型产物。工作台保存总体结论、人工建议开场、其他修改意见和可选的优先级反馈，不提供模型触发或消息发送能力：
 
 ```bash

@@ -1270,8 +1270,23 @@ class ReviewPortalHandler(BaseHTTPRequestHandler):
             conn.execute("PRAGMA query_only = ON")
         return conn
 
-    def _run(self, conn: sqlite3.Connection) -> sqlite3.Row:
+    def _run(self, conn: sqlite3.Connection) -> Mapping[str, Any]:
         fields = "sales_profile_run_id,as_of_at,status,model,created_at,completed_at"
+        if self.server.run_id == "all":
+            row = conn.execute(
+                "SELECT MAX(as_of_at) as_of_at,MAX(created_at) created_at,"
+                "MAX(completed_at) completed_at FROM sales_profile_runs WHERE status='complete'"
+            ).fetchone()
+            if row is None or not row["as_of_at"]:
+                raise PortalError(HTTPStatus.NOT_FOUND, "run_not_found", "画像批次不存在")
+            return {
+                "sales_profile_run_id": "all",
+                "as_of_at": row["as_of_at"],
+                "status": "complete",
+                "model": "mixed",
+                "created_at": row["created_at"],
+                "completed_at": row["completed_at"],
+            }
         if self.server.run_id == "latest":
             row = conn.execute(
                 "SELECT %s FROM sales_profile_runs ORDER BY created_at DESC,sales_profile_run_id DESC LIMIT 1" % fields
@@ -1297,15 +1312,20 @@ class ReviewPortalHandler(BaseHTTPRequestHandler):
         profile_id: str,
         run: Mapping[str, Any],
     ) -> sqlite3.Row:
+        scope = "r.status='complete'" if self.server.run_id == "all" else "s.sales_profile_run_id=?"
+        params: Tuple[Any, ...] = (profile_id,) if self.server.run_id == "all" else (
+            profile_id,
+            run["sales_profile_run_id"],
+        )
         row = conn.execute(
             "SELECT p.card_version,p.profile_json,s.phone_hmac,s.customer_key,"
-            "r.as_of_at,r.message_snapshot_id,ss.record_count "
+            "r.sales_profile_run_id,r.as_of_at,r.message_snapshot_id,ss.record_count "
             "FROM sales_profiles p JOIN sales_profile_subjects s ON s.subject_id=p.subject_id "
             "JOIN sales_profile_runs r ON r.sales_profile_run_id=s.sales_profile_run_id "
             "JOIN source_snapshots ss ON ss.snapshot_id=r.message_snapshot_id "
             " AND ss.run_id=r.source_run_id "
-            "WHERE p.sales_profile_id=? AND s.sales_profile_run_id=? AND p.status='succeeded'",
-            (profile_id, run["sales_profile_run_id"]),
+            "WHERE p.sales_profile_id=? AND " + scope + " AND p.status='succeeded'",
+            params,
         ).fetchone()
         if row is None:
             raise PortalError(HTTPStatus.NOT_FOUND, "profile_not_found", "画像不存在")
@@ -1343,7 +1363,7 @@ class ReviewPortalHandler(BaseHTTPRequestHandler):
         with self._db() as conn:
             run = self._run(conn)
             context = self._profile_message_context(conn, profile_id, run)
-            run_id = str(run["sales_profile_run_id"])
+            run_id = str(context["sales_profile_run_id"])
             customer_key = str(context["customer_key"])
             as_of_at = str(context["as_of_at"])
             record_count = int(context["record_count"])
@@ -1439,30 +1459,37 @@ class ReviewPortalHandler(BaseHTTPRequestHandler):
         *,
         stratum: str = "",
     ) -> list[Dict[str, Any]]:
-        clauses = ["s.sales_profile_run_id=?", "p.status='succeeded'"]
-        params: list[Any] = [run_id]
-        if stratum:
+        all_runs = run_id == "all"
+        clauses = ["r.status='complete'" if all_runs else "s.sales_profile_run_id=?", "p.status='succeeded'"]
+        params: list[Any] = [] if all_runs else [run_id]
+        if stratum and not all_runs:
             clauses.append("s.stratum=?")
             params.append(stratum)
         rows = conn.execute(
             "SELECT p.sales_profile_id,p.card_version,p.deterministic_facts_json,"
+            "p.model,p.prompt_version,p.profile_schema_version,p.updated_at profile_updated_at,"
             "s.stratum,s.stratum_rank,s.phone_hmac,s.profile_id,c.display_name,"
+            "r.sales_profile_run_id,r.as_of_at,r.created_at run_created_at,"
             "(SELECT COUNT(*) FROM sales_profile_opening_reviews rv "
             " WHERE rv.sales_profile_id=p.sales_profile_id AND rv.reviewer_key=?) review_count,"
             "(SELECT verdict FROM sales_profile_opening_reviews rv "
             " WHERE rv.sales_profile_id=p.sales_profile_id AND rv.reviewer_key=? "
             " ORDER BY updated_at DESC,review_id DESC LIMIT 1) latest_verdict,"
+            "(SELECT updated_at FROM sales_profile_opening_reviews rv "
+            " WHERE rv.sales_profile_id=p.sales_profile_id AND rv.reviewer_key=? "
+            " ORDER BY updated_at DESC,review_id DESC LIMIT 1) latest_review_updated_at,"
             "EXISTS(SELECT 1 FROM sales_profile_events e WHERE e.subject_id=s.subject_id "
             " AND e.validation_state='accepted' AND e.event_type='contact_refusal') contact_refusal,"
             "EXISTS(SELECT 1 FROM sales_profile_events e WHERE e.subject_id=s.subject_id "
             " AND e.validation_state='accepted' AND e.event_type IN "
             " ('future_return','delayed_purchase','stock_wait','promotion_or_payday_wait')) future_signal "
             "FROM sales_profile_subjects s JOIN sales_profiles p ON p.subject_id=s.subject_id "
-            "JOIN customers c ON c.customer_key=s.customer_key WHERE "
+            "JOIN customers c ON c.customer_key=s.customer_key "
+            "JOIN sales_profile_runs r ON r.sales_profile_run_id=s.sales_profile_run_id WHERE "
             + " AND ".join(clauses),
-            (SHARED_REVIEWER_KEY, SHARED_REVIEWER_KEY, *params),
+            (SHARED_REVIEWER_KEY, SHARED_REVIEWER_KEY, SHARED_REVIEWER_KEY, *params),
         ).fetchall()
-        items = []
+        versions: list[Dict[str, Any]] = []
         for raw_row in rows:
             row = dict(raw_row)
             facts = _json(row.get("deterministic_facts_json"), {})
@@ -1474,9 +1501,10 @@ class ReviewPortalHandler(BaseHTTPRequestHandler):
                 future_signal=bool(row.get("future_signal")),
             )
             customer = _public_customer(row, facts, self.server.customer_index)
-            items.append(
+            versions.append(
                 {
                     "sales_profile_id": row["sales_profile_id"],
+                    "phone_hmac": row["phone_hmac"],
                     "label": customer["name"],
                     "phone_hint": customer["phone_hint"],
                     "stratum": row["stratum"],
@@ -1484,6 +1512,14 @@ class ReviewPortalHandler(BaseHTTPRequestHandler):
                     "review_count": int(row.get("review_count") or 0),
                     "latest_verdict": row.get("latest_verdict"),
                     "card_version": row["card_version"],
+                    "sales_profile_run_id": row["sales_profile_run_id"],
+                    "model": row["model"],
+                    "prompt_version": row["prompt_version"],
+                    "profile_schema_version": row["profile_schema_version"],
+                    "as_of_at": row["as_of_at"],
+                    "run_created_at": row["run_created_at"],
+                    "profile_updated_at": row["profile_updated_at"],
+                    "latest_review_updated_at": row.get("latest_review_updated_at"),
                     "priority_score": business["priority_score"],
                     "recency_penalty": business["recency_penalty"],
                     "proactive_followup_blocked": business["proactive_followup_blocked"],
@@ -1496,6 +1532,52 @@ class ReviewPortalHandler(BaseHTTPRequestHandler):
                     "days_since_last_order": business["days_since_last_order"],
                 }
             )
+        if all_runs:
+            by_phone: Dict[str, list[Dict[str, Any]]] = {}
+            for version in versions:
+                by_phone.setdefault(str(version.get("phone_hmac") or version["sales_profile_id"]), []).append(version)
+            items = []
+            for grouped in by_phone.values():
+                reviewed_versions = [item for item in grouped if item["review_count"]]
+                candidates = reviewed_versions or grouped
+                canonical = max(
+                    candidates,
+                    key=lambda item: (
+                        str(item.get("latest_review_updated_at") or "") if reviewed_versions else str(item.get("run_created_at") or ""),
+                        str(item.get("profile_updated_at") or ""),
+                        str(item["sales_profile_id"]),
+                    ),
+                ).copy()
+                canonical["version_count"] = len(grouped)
+                canonical["review_count"] = int(bool(reviewed_versions))
+                if reviewed_versions:
+                    canonical["latest_verdict"] = max(
+                        reviewed_versions,
+                        key=lambda item: (
+                            str(item.get("latest_review_updated_at") or ""),
+                            str(item["sales_profile_id"]),
+                        ),
+                    ).get("latest_verdict")
+                items.append(canonical)
+            if stratum:
+                items = [item for item in items if item["stratum"] == stratum]
+        else:
+            items = versions
+            for item in items:
+                item["version_count"] = 1
+        for item in items:
+            for internal_key in (
+                "phone_hmac",
+                "sales_profile_run_id",
+                "model",
+                "prompt_version",
+                "profile_schema_version",
+                "as_of_at",
+                "run_created_at",
+                "profile_updated_at",
+                "latest_review_updated_at",
+            ):
+                item.pop(internal_key, None)
         items.sort(
             key=lambda item: (
                 {"eligible": 0, "review": 1, "excluded": 2}.get(
@@ -1513,18 +1595,19 @@ class ReviewPortalHandler(BaseHTTPRequestHandler):
             run = self._run(conn)
             run_id = run["sales_profile_run_id"]
             items = self._listing_rows(conn, run_id)
-            verdicts = {
-                row["verdict"]: int(row["n"])
-                for row in conn.execute(
-                    "SELECT verdict,COUNT(DISTINCT sales_profile_id) n "
-                    "FROM sales_profile_opening_reviews rv "
-                    "WHERE rv.reviewer_key=? AND EXISTS(SELECT 1 FROM sales_profile_subjects s "
-                    "JOIN sales_profiles p ON p.subject_id=s.subject_id "
-                    "WHERE p.sales_profile_id=rv.sales_profile_id AND s.sales_profile_run_id=?) "
-                    "GROUP BY verdict",
-                    (SHARED_REVIEWER_KEY, run_id),
-                )
-            }
+            verdicts = dict(Counter(
+                str(item["latest_verdict"])
+                for item in items
+                if item["review_count"] and item.get("latest_verdict")
+            ))
+            if run_id == "all":
+                batch_count = int(conn.execute(
+                    "SELECT COUNT(*) FROM sales_profile_runs WHERE status='complete'"
+                ).fetchone()[0])
+                profile_versions = sum(int(item["version_count"]) for item in items)
+            else:
+                batch_count = 1
+                profile_versions = len(items)
         reviewed = sum(bool(item["review_count"]) for item in items)
         self._send_json(
             HTTPStatus.OK,
@@ -1533,6 +1616,8 @@ class ReviewPortalHandler(BaseHTTPRequestHandler):
                 "total": len(items),
                 "generated": len(items),
                 "reviewed": reviewed,
+                "batch_count": batch_count,
+                "profile_versions": profile_versions,
                 "promotion_eligible": sum(bool(item["promotion_eligible"]) for item in items),
                 "promotion_review": sum(item["promotion_state"] == "review" for item in items),
                 "promotion_excluded": sum(item["promotion_state"] == "excluded" for item in items),
@@ -1581,15 +1666,20 @@ class ReviewPortalHandler(BaseHTTPRequestHandler):
         profile_id = self._profile_id(profile_id)
         with self._db() as conn:
             run = self._run(conn)
+            scope = "r.status='complete'" if self.server.run_id == "all" else "s.sales_profile_run_id=?"
+            params: Tuple[Any, ...] = (profile_id,) if self.server.run_id == "all" else (
+                profile_id,
+                run["sales_profile_run_id"],
+            )
             row = conn.execute(
                 "SELECT p.sales_profile_id,p.card_version,p.profile_json,p.deterministic_facts_json,"
-                "p.model,p.updated_at,s.stratum,s.stratum_rank,s.phone_hmac,s.profile_id,"
-                "c.display_name,r.as_of_at,r.order_snapshot_id "
+                "p.model,p.prompt_version,p.profile_schema_version,p.updated_at,s.stratum,s.stratum_rank,s.phone_hmac,s.profile_id,"
+                "c.display_name,r.sales_profile_run_id,r.as_of_at,r.order_snapshot_id,r.created_at run_created_at "
                 "FROM sales_profiles p JOIN sales_profile_subjects s ON s.subject_id=p.subject_id "
                 "JOIN customers c ON c.customer_key=s.customer_key "
                 "JOIN sales_profile_runs r ON r.sales_profile_run_id=s.sales_profile_run_id "
-                "WHERE p.sales_profile_id=? AND s.sales_profile_run_id=? AND p.status='succeeded'",
-                (profile_id, run["sales_profile_run_id"]),
+                "WHERE p.sales_profile_id=? AND " + scope + " AND p.status='succeeded'",
+                params,
             ).fetchone()
             if row is None:
                 raise PortalError(HTTPStatus.NOT_FOUND, "profile_not_found", "画像不存在")
@@ -1615,7 +1705,58 @@ class ReviewPortalHandler(BaseHTTPRequestHandler):
                 order_snapshot_id=row["order_snapshot_id"],
                 phone_hmac=row["phone_hmac"],
             )
+            version_scope = "r.status='complete'" if self.server.run_id == "all" else "r.sales_profile_run_id=?"
+            version_params: Tuple[Any, ...] = (row["phone_hmac"],) if self.server.run_id == "all" else (
+                row["phone_hmac"],
+                run["sales_profile_run_id"],
+            )
+            version_rows = conn.execute(
+                "SELECT p.sales_profile_id,p.card_version,p.model,p.prompt_version,p.profile_schema_version,"
+                "p.updated_at,r.sales_profile_run_id,r.as_of_at,r.created_at run_created_at,"
+                "(SELECT verdict FROM sales_profile_opening_reviews rv WHERE rv.sales_profile_id=p.sales_profile_id "
+                " AND rv.reviewer_key=? ORDER BY rv.updated_at DESC,rv.review_id DESC LIMIT 1) verdict,"
+                "(SELECT updated_at FROM sales_profile_opening_reviews rv WHERE rv.sales_profile_id=p.sales_profile_id "
+                " AND rv.reviewer_key=? ORDER BY rv.updated_at DESC,rv.review_id DESC LIMIT 1) review_updated_at "
+                "FROM sales_profiles p JOIN sales_profile_subjects s ON s.subject_id=p.subject_id "
+                "JOIN sales_profile_runs r ON r.sales_profile_run_id=s.sales_profile_run_id "
+                "WHERE s.phone_hmac=? AND " + version_scope + " AND p.status='succeeded'",
+                (SHARED_REVIEWER_KEY, SHARED_REVIEWER_KEY, *version_params),
+            ).fetchall()
         row_dict = dict(row)
+        raw_versions = [dict(item) for item in version_rows]
+        reviewed_versions = [item for item in raw_versions if item.get("verdict")]
+        canonical_candidates = reviewed_versions or raw_versions
+        canonical = max(
+            canonical_candidates,
+            key=lambda item: (
+                str(item.get("review_updated_at") or "") if reviewed_versions else str(item.get("run_created_at") or ""),
+                str(item.get("updated_at") or ""),
+                str(item["sales_profile_id"]),
+            ),
+        )
+        canonical_profile_id = str(canonical["sales_profile_id"])
+        raw_versions.sort(
+            key=lambda item: (
+                item["sales_profile_id"] != canonical_profile_id,
+                -int(bool(item.get("verdict"))),
+                str(item.get("run_created_at") or ""),
+            )
+        )
+        versions = [
+            {
+                "sales_profile_id": item["sales_profile_id"],
+                "sales_profile_run_id": item["sales_profile_run_id"],
+                "card_version": item["card_version"],
+                "model": item["model"],
+                "prompt_version": item["prompt_version"],
+                "profile_schema_version": item["profile_schema_version"],
+                "as_of_at": item["as_of_at"],
+                "reviewed": bool(item.get("verdict")),
+                "verdict": item.get("verdict"),
+                "is_canonical": item["sales_profile_id"] == canonical_profile_id,
+            }
+            for item in raw_versions
+        ]
         facts = _json(row_dict.get("deterministic_facts_json"), {})
         if not isinstance(facts, dict):
             facts = {}
@@ -1639,6 +1780,9 @@ class ReviewPortalHandler(BaseHTTPRequestHandler):
             HTTPStatus.OK,
             {
                 "sales_profile_id": row["sales_profile_id"],
+                "sales_profile_run_id": row["sales_profile_run_id"],
+                "canonical_profile_id": canonical_profile_id,
+                "versions": versions,
                 "label": customer["name"],
                 "stratum": row["stratum"],
                 "rank": int(row["stratum_rank"]),

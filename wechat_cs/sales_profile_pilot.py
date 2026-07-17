@@ -25,9 +25,11 @@ from .action_pipeline import (
 from .core import DEFAULT_HMAC_SECRET, hmac_id, json_dumps
 from .customer_features import FEATURE_RULE_VERSION
 from .sales_profile_sampling import (
-    DEFAULT_STRATUM_QUOTAS,
+    BATCH_QUOTAS_BY_SIZE,
+    FULL_REMAINING_SAMPLING_VERSION,
     SAMPLING_VERSION,
     SamplingCandidate,
+    select_all_remaining_sales_profile_subjects,
     select_sales_profile_subjects,
 )
 from .source_snapshot import hmac_key_fingerprint
@@ -39,7 +41,7 @@ DEFAULT_SOURCE_RUN_ID = "20260713T140730+0800-833c3257"
 DEFAULT_AS_OF_AT = "2026-07-13T20:14:37+08:00"
 DEFAULT_MODEL = "kimi-k2.7-code"
 EXTRACTION_PROMPT_VERSION = "sales-events-v2"
-PROFILE_PROMPT_VERSION = "sales-profile-v3"
+PROFILE_PROMPT_VERSION = "sales-profile-v4"
 PROFILE_SCHEMA_VERSION = "sales-profile-card-v1"
 
 _FUTURE_WAIT_PATTERNS = (
@@ -318,10 +320,26 @@ def prepare_sales_profile_pilot(
     source_run_id: str = DEFAULT_SOURCE_RUN_ID,
     secret: Optional[str] = None,
     model: str = DEFAULT_MODEL,
+    provider: str = "kimi",
+    subject_count: int = 50,
+    all_remaining: bool = False,
+    exclude_run_ids: Sequence[str] = (),
 ) -> Dict[str, object]:
-    """Refresh deterministic facts and freeze exactly 50 subjects; never call Kimi."""
+    """Refresh facts and freeze one isolated review cohort; never call a model."""
 
     actual_secret = secret or os.environ.get("WECHAT_CS_HMAC_SECRET", DEFAULT_HMAC_SECRET)
+    normalized_provider = str(provider or "").strip().lower()
+    if normalized_provider not in {"kimi", "cliproxyapi"}:
+        raise ValueError("sales profile provider must be kimi or cliproxyapi")
+    quotas = None
+    if not all_remaining:
+        try:
+            quotas = BATCH_QUOTAS_BY_SIZE[int(subject_count)]
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("sales profile subject_count must be 50 or 100") from exc
+    normalized_exclude_runs = tuple(
+        sorted({str(item).strip() for item in exclude_run_ids if str(item).strip()})
+    )
     cutoff = _moment(as_of_at, field="as_of_at")
     connection = open_store(str(Path(db_path).expanduser().resolve()))
     try:
@@ -374,9 +392,54 @@ def prepare_sales_profile_pilot(
             source_run_id=source_run_id,
             aux_snapshot_id=aux_snapshot_id,
         )
-        selected = select_sales_profile_subjects(candidates, secret=actual_secret)
-        if len(selected) != 50:
-            raise RuntimeError("sales profile pilot must freeze exactly 50 subjects")
+        excluded_customers = set()
+        excluded_phones = set()
+        for excluded_run_id in normalized_exclude_runs:
+            excluded_run = connection.execute(
+                "SELECT 1 FROM sales_profile_runs WHERE sales_profile_run_id=?",
+                (excluded_run_id,),
+            ).fetchone()
+            if excluded_run is None:
+                raise ValueError("excluded sales profile run was not found: %s" % excluded_run_id)
+            excluded_customers.update(
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT customer_key FROM sales_profile_subjects WHERE sales_profile_run_id=?",
+                    (excluded_run_id,),
+                )
+            )
+            excluded_phones.update(
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT phone_hmac FROM sales_profile_subjects WHERE sales_profile_run_id=?",
+                    (excluded_run_id,),
+                )
+            )
+        if all_remaining:
+            selected = select_all_remaining_sales_profile_subjects(
+                candidates,
+                secret=actual_secret,
+                excluded_customer_keys=tuple(sorted(excluded_customers)),
+                excluded_phone_hmacs=tuple(sorted(excluded_phones)),
+            )
+            if not selected:
+                raise RuntimeError("sales profile full-remaining batch has no eligible subjects")
+            actual_sampling_version = FULL_REMAINING_SAMPLING_VERSION
+            quotas = dict(Counter(item.stratum for item in selected))
+        else:
+            selected = select_sales_profile_subjects(
+                candidates,
+                secret=actual_secret,
+                quotas=quotas,
+                excluded_customer_keys=tuple(sorted(excluded_customers)),
+                excluded_phone_hmacs=tuple(sorted(excluded_phones)),
+                minimum_birthday_matches=max(5, int(subject_count) // 10),
+            )
+            if len(selected) != int(subject_count):
+                raise RuntimeError(
+                    "sales profile batch must freeze exactly %d subjects" % int(subject_count)
+                )
+            actual_sampling_version = SAMPLING_VERSION
 
         cohort_payload = [
             (item.customer_key, item.stratum, item.stratum_rank) for item in selected
@@ -389,10 +452,13 @@ def prepare_sales_profile_pilot(
                 {
                     "subjects": cohort_payload,
                     "model": model,
+                    "provider": normalized_provider,
+                    "excluded_run_ids": normalized_exclude_runs,
+                    "all_remaining": bool(all_remaining),
                     "extraction_prompt_version": EXTRACTION_PROMPT_VERSION,
                     "profile_prompt_version": PROFILE_PROMPT_VERSION,
                     "profile_schema_version": PROFILE_SCHEMA_VERSION,
-                    "sampling_version": SAMPLING_VERSION,
+                    "sampling_version": actual_sampling_version,
                 }
             ).encode("utf-8")
         ).hexdigest()
@@ -402,7 +468,7 @@ def prepare_sales_profile_pilot(
             source_run_id,
             cutoff.isoformat(timespec="seconds"),
             cohort_hash,
-            SAMPLING_VERSION,
+            actual_sampling_version,
             model,
             EXTRACTION_PROMPT_VERSION,
             PROFILE_PROMPT_VERSION,
@@ -424,6 +490,11 @@ def prepare_sales_profile_pilot(
             "profile_counts": dict(sorted(profile_counts.items())),
             "birthday_match_count": birthday_count,
             "model": model,
+            "provider": normalized_provider,
+            "excluded_run_ids": list(normalized_exclude_runs),
+            "excluded_customer_count": len(excluded_customers),
+            "excluded_person_count": len(excluded_phones),
+            "all_remaining": bool(all_remaining),
             "model_called": False,
             "send_allowed": False,
         }
@@ -471,14 +542,20 @@ def prepare_sales_profile_pilot(
                     model,
                     "%s+%s" % (EXTRACTION_PROMPT_VERSION, PROFILE_PROMPT_VERSION),
                     PROFILE_SCHEMA_VERSION,
-                    SAMPLING_VERSION,
+                    actual_sampling_version,
                     message_snapshot_id,
                     str(order_row["order_snapshot_id"]),
                     aux_snapshot_id,
                     cohort_hash,
                     json_dumps(
                         {
-                            "quotas": dict(DEFAULT_STRATUM_QUOTAS),
+                            "quotas": dict(quotas),
+                            "subject_count": len(selected),
+                            "all_remaining": bool(all_remaining),
+                            "provider": normalized_provider,
+                            "excluded_run_ids": list(normalized_exclude_runs),
+                            "excluded_customer_count": len(excluded_customers),
+                            "excluded_person_count": len(excluded_phones),
                             "automatic_send": False,
                             "contact_warning": "联系前核对最新状态",
                         }

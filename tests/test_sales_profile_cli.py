@@ -71,9 +71,90 @@ class SalesProfileCliTests(unittest.TestCase):
             as_of_at=DEFAULT_AS_OF_AT,
             source_run_id=DEFAULT_SOURCE_RUN_ID,
             model=DEFAULT_MODEL,
+            provider="kimi",
+            subject_count=50,
+            all_remaining=False,
+            exclude_run_ids=[],
             secret=SECRET,
         )
         run.assert_not_called()
+
+    @patch("wechat_cs.__main__.prepare_sales_profile_pilot")
+    def test_prepare_forwards_expanded_cpa_batch_contract(self, prepare) -> None:
+        prepare.return_value = {
+            "sales_profile_run_id": "cpa-run",
+            "subject_count": 100,
+            "provider": "cliproxyapi",
+            "send_allowed": False,
+        }
+        with patch.dict(os.environ, {"WECHAT_CS_HMAC_SECRET": SECRET}):
+            code, payload = self._run(
+                [
+                    "prepare-sales-profile-pilot",
+                    "--db",
+                    "/tmp/pilot.sqlite3",
+                    "--model",
+                    "gpt-5.5",
+                    "--provider",
+                    "cliproxyapi",
+                    "--subject-count",
+                    "100",
+                    "--exclude-run-id",
+                    "original-run",
+                ]
+            )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["subject_count"], 100)
+        prepare.assert_called_once_with(
+            Path("/tmp/pilot.sqlite3"),
+            as_of_at=DEFAULT_AS_OF_AT,
+            source_run_id=DEFAULT_SOURCE_RUN_ID,
+            model="gpt-5.5",
+            provider="cliproxyapi",
+            subject_count=100,
+            all_remaining=False,
+            exclude_run_ids=["original-run"],
+            secret=SECRET,
+        )
+
+    @patch("wechat_cs.__main__.prepare_sales_profile_pilot")
+    def test_prepare_forwards_full_remaining_contract(self, prepare) -> None:
+        prepare.return_value = {
+            "sales_profile_run_id": "full-run",
+            "subject_count": 1134,
+            "all_remaining": True,
+        }
+        with patch.dict(os.environ, {"WECHAT_CS_HMAC_SECRET": SECRET}):
+            code, payload = self._run(
+                [
+                    "prepare-sales-profile-pilot",
+                    "--db",
+                    "/tmp/pilot.sqlite3",
+                    "--model",
+                    "gpt-5.5",
+                    "--provider",
+                    "cliproxyapi",
+                    "--all-remaining",
+                    "--exclude-run-id",
+                    "old-run",
+                    "--exclude-run-id",
+                    "expanded-run",
+                ]
+            )
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["subject_count"], 1134)
+        prepare.assert_called_once_with(
+            Path("/tmp/pilot.sqlite3"),
+            as_of_at=DEFAULT_AS_OF_AT,
+            source_run_id=DEFAULT_SOURCE_RUN_ID,
+            model="gpt-5.5",
+            provider="cliproxyapi",
+            subject_count=50,
+            all_remaining=True,
+            exclude_run_ids=["old-run", "expanded-run"],
+            secret=SECRET,
+        )
 
     @patch("wechat_cs.__main__.run_sales_profile_pilot")
     def test_run_forwards_resume_run_id_and_concurrency(self, run) -> None:
@@ -110,6 +191,7 @@ class SalesProfileCliTests(unittest.TestCase):
             sales_profile_run_id="pilot-run",
             resume=True,
             concurrency=3,
+            max_subjects=None,
             secret=SECRET,
         )
 
@@ -136,6 +218,7 @@ class SalesProfileCliTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(run.call_args.kwargs["sales_profile_run_id"], "latest")
         self.assertEqual(run.call_args.kwargs["concurrency"], 2)
+        self.assertIsNone(run.call_args.kwargs["max_subjects"])
         self.assertFalse(run.call_args.kwargs["resume"])
 
 

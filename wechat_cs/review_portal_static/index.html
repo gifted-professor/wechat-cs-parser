@@ -20,7 +20,7 @@
     </header>
 
     <nav class="mode-tabs" aria-label="审核类型">
-      <button class="active" data-workspace="followup" type="button"><b>客户跟进审核</b><small>50 位客户画像、优先级与开场</small></button>
+      <button class="active" data-workspace="followup" type="button"><b>客户跟进审核</b><small>全部客户画像、优先级与开场</small></button>
       <button data-workspace="conversion" type="button"><b>成交方法论审核</b><small>主动咨询、价格阻力、成交与复购</small></button>
     </nav>
 
@@ -79,6 +79,9 @@
               <p id="sampleMeta">—</p>
             </div>
             <div class="header-actions">
+              <label id="profileVersionWrap" class="version-picker hidden">画像版本
+                <select id="profileVersionSelect" aria-label="切换画像版本"></select>
+              </label>
               <span id="headerPriority" class="priority-pill">—</span>
               <button id="nextUnreviewed" class="secondary" type="button">下一位待验收</button>
             </div>

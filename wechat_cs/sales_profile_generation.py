@@ -25,7 +25,7 @@ from .sales_profile_raw import (
     chunk_raw_messages,
     load_raw_sales_conversations,
 )
-from .sales_profile_sampling import SAMPLING_VERSION
+from .sales_profile_sampling import FULL_REMAINING_SAMPLING_VERSION, SAMPLING_VERSION
 from .source_snapshot import hmac_key_fingerprint
 from .store import open_store
 
@@ -79,6 +79,52 @@ CARD_FIELDS = (
     "unknowns",
     "evidence",
 )
+BUSINESS_CONTEXT = {
+    "context_version": "sales-business-context-v1",
+    "scope": "historical_profile_guidance_not_live_quote",
+    "inventory": {
+        "default_assumption": "厂家通常可持续供货，默认按有货处理",
+        "record_semantics": "一条商品记录代表一种商品类型，不代表一件实物，也不等于具体 SKU",
+        "xianyu_view_assumption": "闲鱼上架视图默认显示有库存",
+        "live_source": {
+            "base_title": "单号查询",
+            "table_name": "库存表",
+            "table_id": "tblU2krjSGhpXHwI",
+            "view_id": "vew11gliHY",
+            "fields": ["厂家", "相册货号", "成本", "报单名称", "当月单量", "备注"],
+        },
+        "rule": "形成实际回复或报价前再查询实时源；历史画像不得宣称某个具体款式实时有货",
+    },
+    "human_confirmation": {
+        "color": "颜色必须人工确认",
+        "size": "尺码必须人工确认；常见范围约 XS 到 XXL 只能作为经验，不能当作具体款式事实",
+        "product_choice": "推荐哪一种商品由人工最终选择",
+        "price_exception": "老客户降价或低于默认毛利必须人工决定",
+    },
+    "pricing": {
+        "metric": "gross_margin",
+        "default_wechat_margin": 0.40,
+        "human_discretion_margin_range": [0.30, 0.40],
+        "formula": "sale_price = cost / (1 - gross_margin)",
+        "example": "成本 100 时理论区间约 143 到 167，可结合客单价人工取 149 或 159 等价格点",
+        "customer_anchor": "报价参考客户历史平均客单价，但不得把历史成交价冒充当前报价",
+    },
+    "product_selection": {
+        "primary": "人工选择，或优先参考该商品类型的退货率",
+        "tie_break": "退货率相近时优先较低成本",
+    },
+    "customer_assessment": {
+        "dimensions": ["成交是否爽快", "价格敏感度", "议价频率", "对优惠的依赖程度"],
+        "evidence_gate": "只依据历史聊天和订单证据；证据不足就写未知，不使用贬义标签",
+    },
+    "service_sop": {
+        "silent_customer": "客户沉默时可以及时、因场景而异地回访；价格不满意只能作为待验证假设",
+        "unknown_product": "不认识的款式先礼貌承接并争取查询时间，再核对货号、实时商品源或交由人工",
+        "explicit_rejection": "客户明确拒绝时礼貌收尾，不施压",
+        "aftersales": "售后客户先解决体验和退款登记问题，不先推新品",
+        "truthfulness": "不得编造清仓、仅剩一件、特定尺码特价、发票原因、库存、优惠或其他稀缺事实",
+    },
+}
 _REDACTION_PLACEHOLDER = re.compile(
     r"\[(?:身份证|地址|姓名|手机号|邮箱|链接|微信号|金额|日期|单号|库存状态|物流状态|退款结论|时效承诺)\]"
 )
@@ -376,6 +422,7 @@ def _load_deterministic_facts(
         "member_facts": member_facts,
         "factory_is_not_brand": True,
         "point_in_time_snapshots_frozen": True,
+        "business_context": BUSINESS_CONTEXT,
     }
     return facts, orders
 
@@ -536,6 +583,7 @@ def _profile_prompt(facts: Mapping[str, object], events: Sequence[Mapping[str, o
                 "你是资深微信销售主管。只使用已验证事件和确定性事实生成自然、不过度促销的作战卡。"
                 "没有证据的品牌、活动、生日或承诺必须放入 unknowns；联系前必须核对最新状态。"
                 "订单时间只有 time_known=true 时才能形成小时节律；零点日期占位不得解释为午夜下单。"
+                "业务口径只用于指导画像和人工决策，不得把默认库存、经验尺码、定价公式或 SOP 假设写成客户或商品事实。"
             ),
         },
         {
@@ -567,6 +615,10 @@ def _profile_prompt(facts: Mapping[str, object], events: Sequence[Mapping[str, o
                         "Every evidence item must cite an exact supplied sales_profile_event_id; use [] when none applies.",
                         "Never claim an aftersales, refund, or return was completed, resolved, or handled unless an accepted event explicitly proves completion.",
                         "For aftersales or complex-risk customers, natural_opening must be service-first: ask about the prior experience before mentioning new products.",
+                        "Assess negotiation style and price sensitivity only from evidence; use neutral wording and unknown when evidence is insufficient.",
+                        "Do not place a live price, color, size, stock promise, discount, or scarcity claim in natural_opening; those require the live source and human confirmation.",
+                        "A silent customer may have price resistance, but treat that only as a hypothesis unless validated evidence proves it.",
+                        "Use the pricing formula only as guidance for a later human quote; never derive an exact live quote from historical order revenue.",
                     ],
                     "deterministic_facts": facts,
                     "validated_events": list(events),
@@ -697,6 +749,20 @@ def _persist_result(connection, result: _GeneratedSubject, *, now: str) -> None:
             )
 
 
+def _client_for_provider(provider: str) -> KimiJsonClient:
+    if provider == "cliproxyapi":
+        base_url = os.environ.get(
+            "CLIPROXYAPI_BASE_URL", "http://127.0.0.1:8317"
+        ).strip().rstrip("/")
+        if not base_url.endswith("/v1"):
+            base_url += "/v1"
+        return KimiJsonClient(
+            api_key=os.environ.get("CLIPROXYAPI_API_KEY", "cliproxyapi-local"),
+            base_url=base_url,
+        )
+    return KimiJsonClient()
+
+
 def run_sales_profile_pilot(
     db_path: Path,
     *,
@@ -707,13 +773,13 @@ def run_sales_profile_pilot(
     secret: Optional[str] = None,
     client: Optional[KimiJsonClient] = None,
     concurrency: int = 2,
+    max_subjects: Optional[int] = None,
 ) -> Dict[str, object]:
     actual_secret = secret or os.environ.get("WECHAT_CS_HMAC_SECRET", DEFAULT_HMAC_SECRET)
     if concurrency < 1 or concurrency > 4:
         raise ValueError("sales profile concurrency must be between 1 and 4")
-    actual_client = client or KimiJsonClient()
-    if client is None and not actual_client.api_key:
-        raise RuntimeError("KIMI_API_KEY is required before running the real pilot")
+    if max_subjects is not None and (max_subjects < 1 or max_subjects > 100):
+        raise ValueError("sales profile max_subjects must be between 1 and 100")
 
     connection = open_store(str(Path(db_path).expanduser().resolve()))
     try:
@@ -728,7 +794,25 @@ def run_sales_profile_pilot(
             ).fetchone()
         if run is None:
             raise RuntimeError("sales profile pilot run was not found")
-        if str(run["sampling_version"]) != SAMPLING_VERSION:
+        try:
+            run_config = json.loads(str(run["config_json"] or "{}"))
+        except (TypeError, json.JSONDecodeError):
+            run_config = {}
+        if not isinstance(run_config, dict):
+            run_config = {}
+        provider = str(run_config.get("provider") or "kimi").strip().lower()
+        actual_client = client or _client_for_provider(provider)
+        if client is None and not actual_client.api_key:
+            required_key = (
+                "CLIPROXYAPI_API_KEY" if provider == "cliproxyapi" else "KIMI_API_KEY"
+            )
+            raise RuntimeError(
+                "%s is required before running the real pilot" % required_key
+            )
+        if str(run["sampling_version"]) not in {
+            SAMPLING_VERSION,
+            FULL_REMAINING_SAMPLING_VERSION,
+        }:
             raise RuntimeError(
                 "sales profile pilot run uses an obsolete sampling version; prepare again"
             )
@@ -770,6 +854,8 @@ def run_sales_profile_pilot(
                 (run["sales_profile_run_id"], *statuses),
             )
         )
+        if max_subjects is not None:
+            rows = rows[:max_subjects]
         if not rows:
             succeeded = connection.execute(
                 "SELECT COUNT(*) FROM sales_profiles p JOIN sales_profile_subjects s ON s.subject_id=p.subject_id "
@@ -782,6 +868,7 @@ def run_sales_profile_pilot(
                 "succeeded": int(succeeded),
                 "failed": 0,
                 "status": str(run["status"]),
+                "provider": provider,
                 "send_allowed": False,
             }
         customer_keys = {str(row["customer_key"]) for row in rows}
@@ -916,6 +1003,7 @@ def run_sales_profile_pilot(
             "succeeded": succeeded,
             "failed": failed,
             "status": status,
+            "provider": provider,
             "send_allowed": False,
         }
     finally:

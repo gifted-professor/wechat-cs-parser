@@ -5,7 +5,10 @@ from dataclasses import replace
 
 from wechat_cs.sales_profile_sampling import (
     DEFAULT_STRATUM_QUOTAS,
+    EXPANDED_100_STRATUM_QUOTAS,
+    FULL_REMAINING_SAMPLING_VERSION,
     SamplingCandidate,
+    select_all_remaining_sales_profile_subjects,
     select_sales_profile_subjects,
 )
 
@@ -119,6 +122,25 @@ def rich_candidate_pool() -> list[SamplingCandidate]:
     return rows
 
 
+def expanded_candidate_pool() -> list[SamplingCandidate]:
+    rows = rich_candidate_pool()
+    for offset in range(160):
+        number = 10_000 + offset
+        rows.append(
+            candidate(
+                number,
+                profile_id=PROFILES[offset % 4],
+                complex_risk=offset < 30,
+                future_return_wait=30 <= offset < 70,
+                frequency=3 + offset % 8,
+                monetary_minor=100_000 + offset * 1_000,
+                recency_days=90 + offset,
+                birthday_match=offset < 30,
+            )
+        )
+    return rows
+
+
 class SalesProfileSamplingTests(unittest.TestCase):
     def test_exact_mutually_exclusive_quota_and_stable_rerun(self) -> None:
         pool = rich_candidate_pool()
@@ -182,6 +204,86 @@ class SalesProfileSamplingTests(unittest.TestCase):
         shared = [item for item in selected if item.phone_hmac == original.phone_hmac]
         self.assertEqual(len(shared), 1)
         self.assertEqual(len({item.phone_hmac for item in selected}), 50)
+
+    def test_expanded_100_batch_excludes_original_50_and_keeps_review_coverage(self) -> None:
+        pool = expanded_candidate_pool()
+        original = select_sales_profile_subjects(pool, secret=SECRET)
+        expanded = select_sales_profile_subjects(
+            pool,
+            secret=SECRET,
+            quotas=EXPANDED_100_STRATUM_QUOTAS,
+            excluded_customer_keys=[item.customer_key for item in original],
+            minimum_birthday_matches=10,
+        )
+        self.assertEqual(len(expanded), 100)
+        self.assertFalse(
+            {item.customer_key for item in original}
+            & {item.customer_key for item in expanded}
+        )
+        self.assertEqual(
+            {
+                stratum: sum(item.stratum == stratum for item in expanded)
+                for stratum in EXPANDED_100_STRATUM_QUOTAS
+            },
+            dict(EXPANDED_100_STRATUM_QUOTAS),
+        )
+        self.assertEqual({item.profile_id for item in expanded}, set(PROFILES))
+        self.assertGreaterEqual(sum(item.birthday_match for item in expanded), 10)
+
+    def test_full_remaining_is_stable_excludes_prior_runs_and_deduplicates_phone(self) -> None:
+        pool = expanded_candidate_pool()
+        original = select_sales_profile_subjects(pool, secret=SECRET)
+        expanded = select_sales_profile_subjects(
+            pool,
+            secret=SECRET,
+            quotas=EXPANDED_100_STRATUM_QUOTAS,
+            excluded_customer_keys=[item.customer_key for item in original],
+            minimum_birthday_matches=10,
+        )
+        duplicate = replace(
+            pool[-1],
+            customer_key="customer_%024x" % 99_999,
+            profile_id="service",
+            feature_snapshot_id="duplicate-feature",
+        )
+        excluded = [item.customer_key for item in (*original, *expanded)]
+        first = select_all_remaining_sales_profile_subjects(
+            [duplicate, *pool],
+            secret=SECRET,
+            excluded_customer_keys=excluded,
+            excluded_phone_hmacs=[original[0].phone_hmac],
+        )
+        second = select_all_remaining_sales_profile_subjects(
+            [*reversed(pool), duplicate],
+            secret=SECRET,
+            excluded_customer_keys=excluded,
+            excluded_phone_hmacs=[original[0].phone_hmac],
+        )
+        self.assertEqual(first, second)
+        self.assertTrue(first)
+        self.assertEqual(len(first), len({item.phone_hmac for item in first}))
+        self.assertFalse({item.customer_key for item in first} & set(excluded))
+        self.assertNotIn(original[0].phone_hmac, {item.phone_hmac for item in first})
+        self.assertTrue(
+            {item.stratum for item in first}
+            <= {
+                "complex_risk",
+                "future_return_wait",
+                "dormant_repeat",
+                "high_frequency",
+                "control",
+            }
+        )
+        self.assertTrue(
+            all(
+                item.selection_reason["sampling_version"]
+                == FULL_REMAINING_SAMPLING_VERSION
+                for item in first
+            )
+        )
+        self.assertTrue(
+            all(item.selection_reason["cohort_mode"] == "full_remaining" for item in first)
+        )
 
 
 if __name__ == "__main__":

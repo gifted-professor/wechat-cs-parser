@@ -183,6 +183,8 @@ input:focus, select:focus, textarea:focus, button:focus-visible {
 .detail-header h2 { margin: 6px 0 5px; font-family: "Songti SC", STSong, serif; font-size: 30px; }
 .detail-header p:last-child { margin: 0; color: var(--muted); font-size: 12px; }
 .header-actions { display: flex; align-items: center; gap: 10px; }
+.version-picker { display: grid; gap: 4px; color: var(--muted); font-size: 10px; font-weight: 700; }
+.version-picker select { max-width: 230px; padding: 8px 30px 8px 10px; border: 1px solid #c4d0c8; border-radius: 10px; background: white; color: var(--ink); font-weight: 700; }
 .priority-pill { padding: 8px 12px; border-radius: 999px; background: var(--green-soft); color: var(--green); font-size: 12px; font-weight: 800; }
 .priority-pill.excluded { background: var(--red-soft); color: var(--red); }
 .priority-pill.review { background: var(--amber-soft); color: var(--amber); }

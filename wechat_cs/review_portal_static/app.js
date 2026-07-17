@@ -198,6 +198,13 @@ function humanize(value) {
     .replace(/\breturn\b/gi, '退货退款');
 }
 
+function modelLabel(value) {
+  const model = String(value || '').toLowerCase();
+  if (model.includes('gpt')) return 'GPT 版';
+  if (model.includes('kimi')) return 'Kimi 版';
+  return '画像版';
+}
+
 function isTechnicalKey(key) {
   return /(?:^|_)(?:id|ids|version|confidence|score|count|rate|ratio|state|rule|evidence|source|hash|raw|minor|seconds|bucket|rank|type|model|field|value|index)(?:_|$)/i.test(key)
     || ['quality_flags', 'parameters', 'metadata'].includes(key);
@@ -822,7 +829,10 @@ async function loadSummary() {
   const identityUpdated = summary.customer_source_synced_at
     ? ` · 客户资料更新于 ${formatDate(summary.customer_source_synced_at, true)}`
     : '';
-  setText('#runMeta', `画像数据截至 ${formatDate(summary.run?.as_of_at)}${identityUpdated} · 联系前仍需核对最新状态`);
+  const scope = summary.batch_count > 1
+    ? `已合并 ${summary.batch_count} 个批次、${summary.profile_versions} 份画像为 ${summary.total} 位客户`
+    : `${summary.total} 位客户`;
+  setText('#runMeta', `${scope} · 数据截至 ${formatDate(summary.run?.as_of_at)}${identityUpdated} · 联系前仍需核对最新状态`);
   return summary;
 }
 
@@ -835,7 +845,7 @@ async function loadProfiles(keepSelection = true) {
   state.profiles = payload.items || [];
   renderProfileList();
 
-  const currentId = keepSelection ? state.current?.sales_profile_id : '';
+  const currentId = keepSelection ? (state.current?.canonical_profile_id || state.current?.sales_profile_id) : '';
   const target = state.profiles.find(item => item.sales_profile_id === currentId) || state.profiles[0];
   if (target) {
     if (!state.current || state.current.sales_profile_id !== target.sales_profile_id || !keepSelection) {
@@ -861,7 +871,8 @@ function renderProfileList() {
     const button = element('button', `sample-row ${promotionState}`);
     button.type = 'button';
     button.dataset.id = profile.sales_profile_id;
-    if (state.current?.sales_profile_id === profile.sales_profile_id) button.classList.add('selected');
+    const selectedId = state.current?.canonical_profile_id || state.current?.sales_profile_id;
+    if (selectedId === profile.sales_profile_id) button.classList.add('selected');
 
     const scoreCopy = promotionState === 'eligible' ? profile.priority_score : (promotionState === 'review' ? '待' : '—');
     const score = element('span', 'sample-score', scoreCopy);
@@ -878,7 +889,7 @@ function renderProfileList() {
         : (profile.proactive_followup_blocked ? '超过一年，不跟进' : '仅服务、不促销'));
     copy.append(
       element('b', '', profile.label),
-      element('small', '', `${profile.phone_hint} · ${stateLabel}`),
+      element('small', '', `${profile.phone_hint} · ${stateLabel}${profile.version_count > 1 ? ` · ${profile.version_count} 个版本` : ''}`),
     );
     const statusCopy = profile.review_count ? (verdictLabels[profile.latest_verdict] || '已验收') : '待验收';
     const status = element('em', profile.review_count ? `status ${profile.latest_verdict}` : 'status', statusCopy);
@@ -911,6 +922,24 @@ function renderDetail(detail) {
   const business = detail.business || {};
   const card = detail.card || {};
   resetMessages();
+
+  const versions = detail.versions || [];
+  const versionWrap = $('#profileVersionWrap');
+  const versionSelect = $('#profileVersionSelect');
+  versionSelect.replaceChildren();
+  versions.forEach((version, index) => {
+    const stateLabel = version.reviewed ? '已审核' : '未审核';
+    const canonicalLabel = version.is_canonical ? ' · 当前主版本' : '';
+    const option = element(
+      'option',
+      '',
+      `${stateLabel}${canonicalLabel} · ${modelLabel(version.model)} · ${formatDate(version.as_of_at)} · 版本 ${index + 1}`,
+    );
+    option.value = version.sales_profile_id;
+    option.selected = version.sales_profile_id === detail.sales_profile_id;
+    versionSelect.append(option);
+  });
+  versionWrap.classList.toggle('hidden', versions.length <= 1);
 
   setText('#sampleStratum', stratumLabels[detail.stratum] || '客户画像');
   setText('#sampleTitle', customer.name || detail.label || '客户');
@@ -1127,9 +1156,10 @@ async function saveReview(event) {
 
 async function nextUnreviewed() {
   if (!state.profiles.length) return;
-  const currentIndex = Math.max(0, state.profiles.findIndex(item => item.sales_profile_id === state.current?.sales_profile_id));
+  const selectedId = state.current?.canonical_profile_id || state.current?.sales_profile_id;
+  const currentIndex = Math.max(0, state.profiles.findIndex(item => item.sales_profile_id === selectedId));
   const ordered = [...state.profiles.slice(currentIndex + 1), ...state.profiles.slice(0, currentIndex + 1)];
-  const next = ordered.find(item => !item.review_count && item.sales_profile_id !== state.current?.sales_profile_id);
+  const next = ordered.find(item => !item.review_count && item.sales_profile_id !== selectedId);
   if (next) await selectProfile(next.sales_profile_id);
   else setText('#saveStatus', '当前列表已全部验收');
 }
@@ -1144,6 +1174,11 @@ function boot() {
   $('#stratumFilter').addEventListener('change', () => loadProfiles(false));
   $('#statusFilter').addEventListener('change', () => loadProfiles(false));
   $('#nextUnreviewed').addEventListener('click', nextUnreviewed);
+  $('#profileVersionSelect').addEventListener('change', event => {
+    if (event.target.value && event.target.value !== state.current?.sales_profile_id) {
+      selectProfile(event.target.value);
+    }
+  });
   $('#nextMethodSample').addEventListener('click', nextConversionSample);
   ['#methodStatusFilter', '#methodStateFilter', '#methodSignalFilter'].forEach(selector => {
     $(selector).addEventListener('change', () => loadConversionSamples(false));

@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
-from tests.test_sales_profile_sampling import rich_candidate_pool
+from tests.test_sales_profile_sampling import expanded_candidate_pool, rich_candidate_pool
 from wechat_cs.sales_profile_pilot import (
     DEFAULT_MODEL,
     _order_is_complex_at,
@@ -249,6 +249,117 @@ class PrepareSalesProfilePilotTests(unittest.TestCase):
                     connection.execute("SELECT COUNT(*) FROM sales_profile_subjects").fetchone()[0],
                     100,
                 )
+            finally:
+                connection.close()
+
+    def test_prepare_expanded_cpa_batch_excludes_original_50(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = self._database(Path(temp_dir).resolve())
+            pool = [
+                replace(item, feature_snapshot_id=None)
+                for item in expanded_candidate_pool()
+            ]
+            connection = open_store(str(db_path))
+            try:
+                with connection:
+                    for item in pool:
+                        connection.execute(
+                            """
+                            INSERT INTO customers(
+                                customer_key,display_name,last_active_at,opportunity_score,
+                                opportunity_level,summary,reasons_json,evidence_json,memory_json,
+                                source_file
+                            ) VALUES(?, 'fixture', ?, 0, 'low', 'fixture', '[]', '[]', '{}',
+                                     'events.jsonl')
+                            """,
+                            (item.customer_key, AS_OF),
+                        )
+            finally:
+                connection.close()
+
+            with (
+                patch(
+                    "wechat_cs.sales_profile_pilot.refresh_sales_profile_features",
+                    return_value={"feature_snapshots": len(pool)},
+                ),
+                patch(
+                    "wechat_cs.sales_profile_pilot.load_sampling_candidates",
+                    return_value=tuple(pool),
+                ),
+            ):
+                original = prepare_sales_profile_pilot(
+                    db_path,
+                    as_of_at=AS_OF,
+                    source_run_id=RUN_ID,
+                    secret=SECRET,
+                )
+                expanded = prepare_sales_profile_pilot(
+                    db_path,
+                    as_of_at=AS_OF,
+                    source_run_id=RUN_ID,
+                    model="gpt-5.5",
+                    provider="cliproxyapi",
+                    subject_count=100,
+                    exclude_run_ids=[original["sales_profile_run_id"]],
+                    secret=SECRET,
+                )
+                full = prepare_sales_profile_pilot(
+                    db_path,
+                    as_of_at=AS_OF,
+                    source_run_id=RUN_ID,
+                    model="gpt-5.5",
+                    provider="cliproxyapi",
+                    all_remaining=True,
+                    exclude_run_ids=[
+                        original["sales_profile_run_id"],
+                        expanded["sales_profile_run_id"],
+                    ],
+                    secret=SECRET,
+                )
+
+            self.assertEqual(expanded["subject_count"], 100)
+            self.assertEqual(expanded["provider"], "cliproxyapi")
+            self.assertEqual(expanded["model"], "gpt-5.5")
+            self.assertEqual(expanded["excluded_customer_count"], 50)
+            self.assertEqual(expanded["excluded_person_count"], 50)
+            self.assertTrue(full["all_remaining"])
+            self.assertEqual(full["subject_count"], len(pool) - 150)
+            self.assertEqual(sum(full["stratum_counts"].values()), len(pool) - 150)
+            connection = open_store(str(db_path), read_only=True)
+            try:
+                old_keys = {
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT customer_key FROM sales_profile_subjects WHERE sales_profile_run_id=?",
+                        (original["sales_profile_run_id"],),
+                    )
+                }
+                new_keys = {
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT customer_key FROM sales_profile_subjects WHERE sales_profile_run_id=?",
+                        (expanded["sales_profile_run_id"],),
+                    )
+                }
+                self.assertEqual(len(new_keys), 100)
+                self.assertFalse(old_keys & new_keys)
+                full_keys = {
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT customer_key FROM sales_profile_subjects WHERE sales_profile_run_id=?",
+                        (full["sales_profile_run_id"],),
+                    )
+                }
+                self.assertFalse((old_keys | new_keys) & full_keys)
+                self.assertEqual(len(full_keys), len(pool) - 150)
+                config = json.loads(
+                    connection.execute(
+                        "SELECT config_json FROM sales_profile_runs WHERE sales_profile_run_id=?",
+                        (expanded["sales_profile_run_id"],),
+                    ).fetchone()[0]
+                )
+                self.assertEqual(config["provider"], "cliproxyapi")
+                self.assertFalse(config["automatic_send"])
             finally:
                 connection.close()
 
