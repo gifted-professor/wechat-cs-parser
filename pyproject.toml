@@ -13,9 +13,10 @@ dependencies = []
 [project.scripts]
 wechat-cs = "wechat_cs.__main__:main"
 wechat-cs-api = "wechat_cs.api:main"
+wechat-cs-review-portal = "wechat_cs.review_portal:main"
 
 [tool.setuptools.packages.find]
 include = ["wechat_cs*", "dashboard_integration*"]
 
 [tool.setuptools.package-data]
-wechat_cs = ["static/*.html", "static/*.js", "static/*.css", "static/*.svg"]
+wechat_cs = ["static/*.html", "static/*.js", "static/*.css", "static/*.svg", "review_portal_static/*.html", "review_portal_static/*.js", "review_portal_static/*.css"]

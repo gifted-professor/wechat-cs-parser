@@ -6,7 +6,7 @@ import json
 import os
 from collections import Counter
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, time
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 from typing import Dict, Optional, Sequence, Tuple
@@ -19,7 +19,7 @@ from .store import initialize_schema, open_store
 
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
-ORDER_RULE_VERSION = "m0-order-v2"
+ORDER_RULE_VERSION = "m0-order-v3"
 SOURCE_NAMESPACE = "dashboard-orders-live"
 _RETURN_TYPES = {"return", "return_taro"}
 _OPEN_RETURN_STATES = {"处理中", "待处理", "未完成", "进行中", "open", "pending"}
@@ -42,11 +42,30 @@ class CanonicalOrder:
     return_status: Optional[str]
     source_hash: str
     quality_flags: Tuple[str, ...]
+    sku_name: Optional[str] = None
+    factory: Optional[str] = None
+    category: Optional[str] = None
+    color: Optional[str] = None
+    size: Optional[str] = None
+    order_note: Optional[str] = None
+    ordered_at: Optional[str] = None
+    paid_at: Optional[str] = None
 
 
 def _text(value: object) -> Optional[str]:
     text = str(value or "").strip()
     return text or None
+
+
+def _product_fact(value: object, *, max_length: int = 200) -> Optional[str]:
+    """Keep a bounded local product fact while stripping accidental PII."""
+
+    text = _text(value)
+    if text is None:
+        return None
+    redacted, _flags = redact_text(text)
+    normalized = redacted.strip()
+    return normalized[:max_length] or None
 
 
 def parse_synced_at(value: object) -> datetime:
@@ -62,7 +81,7 @@ def parse_synced_at(value: object) -> datetime:
     return parsed.astimezone(SHANGHAI)
 
 
-def _source_date(value: object) -> tuple[Optional[date], Optional[str]]:
+def _source_datetime(value: object) -> tuple[Optional[datetime], Optional[str]]:
     if value is None or str(value).strip() == "":
         return None, None
     text = str(value).strip().replace("/", "-")
@@ -75,11 +94,19 @@ def _source_date(value: object) -> tuple[Optional[date], Optional[str]]:
             parsed_date = date.fromisoformat(text[:10])
         except ValueError:
             return None, "invalid"
+        parsed = datetime.combine(parsed_date, time.min, tzinfo=SHANGHAI)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=SHANGHAI)
     else:
-        parsed_date = parsed.astimezone(SHANGHAI).date() if parsed.tzinfo else parsed.date()
-    if parsed_date.year <= 1970:
+        parsed = parsed.astimezone(SHANGHAI)
+    if parsed.year <= 1970:
         return None, "epoch_placeholder"
-    return parsed_date, None
+    return parsed.replace(microsecond=0), None
+
+
+def _source_date(value: object) -> tuple[Optional[date], Optional[str]]:
+    parsed, error = _source_datetime(value)
+    return (parsed.date() if parsed is not None else None), error
 
 
 def _money_minor(value: object) -> tuple[Optional[int], Optional[str]]:
@@ -130,6 +157,32 @@ def _scrub_refund_reason(value: object, row: Dict[str, object]) -> Optional[str]
     return redact_text(reason)[0]
 
 
+def _scrub_order_note(row: Dict[str, object], *, max_length: int = 500) -> Optional[str]:
+    """Combine supported order-note fields without retaining direct PII."""
+
+    values = []
+    for field in ("remarks", "remark", "goods_remark", "order_note"):
+        value = _text(row.get(field))
+        if value and value not in values:
+            values.append(value)
+    if not values:
+        return None
+    note = "；".join(values)
+    for field, placeholder in (
+        ("customer_name", "[客户姓名]"),
+        ("address", "[地址]"),
+        ("phone", "[手机号]"),
+        ("tracking_no", "[单号]"),
+        ("customer_info", "[客户信息]"),
+    ):
+        token = _text(row.get(field))
+        if token and len(token) >= 2:
+            note = note.replace(token, placeholder)
+    redacted, _flags = redact_text(note)
+    normalized = redacted.strip()
+    return normalized[:max_length] or None
+
+
 def normalize_order(
     row: Dict[str, object],
     *,
@@ -142,23 +195,35 @@ def normalize_order(
     if not record_id:
         raise ValueError("order record_id is required")
     flags = set()
-    paid_date, paid_date_error = _source_date(row.get("pay_date"))
+    ordered_datetime, ordered_at_error = _source_datetime(row.get("order_date"))
+    paid_datetime, paid_at_error = _source_datetime(row.get("pay_date"))
     revenue_minor, revenue_error = _money_minor(row.get("revenue"))
-    if paid_date_error:
+    if ordered_at_error:
+        flags.add("invalid_ordered_at")
+    if paid_at_error:
+        flags.add("invalid_paid_at")
         flags.add("invalid_paid_on")
     if revenue_error:
         flags.add("invalid_revenue")
-    if paid_date and paid_date > synced_at.date():
+    if ordered_datetime and ordered_datetime > synced_at:
+        flags.add("future_ordered_at")
+        ordered_datetime = None
+    if paid_datetime and paid_datetime > synced_at:
+        flags.add("future_paid_at")
         flags.add("future_paid_on")
-        paid_date = None
-    valid_payment = paid_date is not None and revenue_minor is not None and revenue_minor > 0
+        paid_datetime = None
+    valid_payment = (
+        paid_datetime is not None and revenue_minor is not None and revenue_minor > 0
+    )
     if not valid_payment:
-        if paid_date is not None or (revenue_minor is not None and revenue_minor > 0):
+        if paid_datetime is not None or (revenue_minor is not None and revenue_minor > 0):
             flags.add("incomplete_customer_payment")
+        paid_at = None
         paid_on = None
         normalized_revenue = None
     else:
-        paid_on = paid_date.isoformat()
+        paid_at = paid_datetime.isoformat(timespec="seconds")
+        paid_on = paid_datetime.date().isoformat()
         normalized_revenue = revenue_minor
 
     refund_type = normalize_refund_type(row.get("refund_type"))
@@ -186,10 +251,20 @@ def normalize_order(
     phone_hmac = global_phone_hmac(secret, phone) if phone else None
     refund_reason = _scrub_refund_reason(row.get("refund_reason"), row)
     return CanonicalOrder(
-        order_line_id=hmac_id(secret, "order-line", source_namespace, record_id),
+        # A record may change between source snapshots.  Include the snapshot
+        # hash so older local facts remain versioned instead of being rewritten.
+        order_line_id=hmac_id(
+            secret, "order-line", source_namespace, record_id, source_hash
+        ),
         source_namespace=source_namespace,
         record_id=record_id,
         phone_hmac=phone_hmac,
+        ordered_at=(
+            ordered_datetime.isoformat(timespec="seconds")
+            if ordered_datetime is not None
+            else None
+        ),
+        paid_at=paid_at,
         paid_on=paid_on,
         revenue_minor=normalized_revenue,
         currency="CNY",
@@ -201,6 +276,12 @@ def normalize_order(
         return_status=return_status,
         source_hash=source_hash,
         quality_flags=tuple(sorted(flags)),
+        sku_name=_product_fact(row.get("sku_name")),
+        factory=_product_fact(row.get("factory")),
+        category=_product_fact(row.get("category") or row.get("product_category")),
+        color=_product_fact(row.get("color"), max_length=80),
+        size=_product_fact(row.get("size"), max_length=80),
+        order_note=_scrub_order_note(row),
     )
 
 
@@ -223,6 +304,9 @@ def _quality_summary(
         "envelope_total": envelope_total,
         "envelope_total_matches": envelope_total == source_records,
         "customer_paid_records": sum(order.paid_on is not None for order in orders),
+        "ordered_at_records": sum(order.ordered_at is not None for order in orders),
+        "paid_at_records": sum(order.paid_at is not None for order in orders),
+        "order_note_records": sum(order.order_note is not None for order in orders),
         "phone_hmac_records": sum(order.phone_hmac is not None for order in orders),
         "refund_type_counts": dict(sorted(refund_types.items())),
         "quality_flag_counts": dict(sorted(flags.items())),
@@ -314,8 +398,13 @@ def import_orders(
                 "UPDATE pipeline_runs SET order_rule_version=? WHERE run_id=?",
                 (ORDER_RULE_VERSION, run["run_id"]),
             )
-            connection.execute("DELETE FROM card_outcomes")
-            connection.execute("DELETE FROM order_snapshots")
+            # Existing point-in-time outcomes remain attached to their
+            # historical cards and superseded order facts.  A later action
+            # rebuild may version/update them, but an additive source import
+            # must never erase reviewed or attributed history.
+            connection.execute(
+                "UPDATE order_snapshots SET state='superseded' WHERE state='active'"
+            )
             connection.execute(
                 """
                 INSERT OR IGNORE INTO source_snapshots(
@@ -359,9 +448,11 @@ def import_orders(
                 """
                 INSERT INTO orders(
                     order_line_id,order_snapshot_id,source_namespace,record_id,phone_hmac,
-                    paid_on,revenue_minor,currency,platform,refund_type,refund_reason,
-                    refund_amount_minor,refund_on,return_status,source_hash,quality_flags_json
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    ordered_at,paid_at,paid_on,revenue_minor,currency,platform,
+                    sku_name,factory,category,color,size,order_note,
+                    refund_type,refund_reason,refund_amount_minor,refund_on,return_status,
+                    source_hash,quality_flags_json
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 [
                     (
@@ -370,10 +461,18 @@ def import_orders(
                         order.source_namespace,
                         order.record_id,
                         order.phone_hmac,
+                        order.ordered_at,
+                        order.paid_at,
                         order.paid_on,
                         order.revenue_minor,
                         order.currency,
                         order.platform,
+                        order.sku_name,
+                        order.factory,
+                        order.category,
+                        order.color,
+                        order.size,
+                        order.order_note,
                         order.refund_type,
                         order.refund_reason,
                         order.refund_amount_minor,

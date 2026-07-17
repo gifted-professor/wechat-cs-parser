@@ -101,7 +101,10 @@ def install(dashboard_dir: Path, project_root: Path) -> None:
     print(f"installed dashboard panel: {target_static / 'index.html'}")
     print(f"server.js patched: {server_changed}")
     print(f"index.html patched: {index_changed}")
-    print("configure WECHAT_CS_BASE_URL and WECHAT_CS_TOKEN before restart")
+    print(
+        "configure WECHAT_CS_BASE_URL, WECHAT_CS_TOKEN, and "
+        "WECHAT_CS_DASHBOARD_TOKEN before restart"
+    )
 
 
 def main() -> None:

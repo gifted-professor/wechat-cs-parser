@@ -21,7 +21,15 @@
       </div>
 
       <nav class="main-nav" aria-label="主导航">
-        <button class="nav-item active" data-view="opportunities">
+        <button class="nav-item active" data-view="actions">
+          <span aria-hidden="true">今</span><span>今日行动</span>
+          <em id="navActionCount">—</em>
+        </button>
+        <button class="nav-item" data-view="profiles">
+          <span aria-hidden="true">像</span><span>50 人画像验收</span>
+          <em id="navProfileCount">—</em>
+        </button>
+        <button class="nav-item" data-view="opportunities">
           <span aria-hidden="true">↗</span><span>客户机会</span>
         </button>
         <button class="nav-item" data-view="aftersales">
@@ -52,15 +60,226 @@
     <main class="main-content">
       <header class="topbar">
         <div>
-          <p class="eyebrow" id="pageEyebrow">今日优先</p>
-          <h1 id="pageTitle">客户机会</h1>
+          <p class="eyebrow" id="pageEyebrow">今日客服行动队列</p>
+          <h1 id="pageTitle">今天先联系谁</h1>
         </div>
         <div class="snapshot-pill" id="snapshotPill"><span></span><b>正在读取本机数据</b></div>
       </header>
 
       <div id="globalNotice" class="notice hidden" role="status"></div>
 
-      <section class="view active" id="view-opportunities" aria-labelledby="pageTitle">
+      <section class="view active" id="view-actions" aria-labelledby="pageTitle">
+        <div class="action-command panel">
+          <div class="action-command-copy">
+            <p class="eyebrow">本机规则排序 · 每条都需人工确认</p>
+            <h2>今天的联系顺序与建议</h2>
+            <p>先处理未回复，再看约定跟进和复购窗口。动态事实未核实前，建议里会保留待确认项。</p>
+          </div>
+          <form id="actionQueueFilters" class="queue-filters">
+            <label for="actionProfile">客服账号
+              <select id="actionProfile" name="profile">
+                <option value="aolai1">aolai1</option>
+              </select>
+            </label>
+            <label for="actionDate">行动日期
+              <input id="actionDate" name="date" type="date" required>
+            </label>
+            <button class="primary-button" type="submit">刷新行动队列</button>
+          </form>
+        </div>
+
+        <div id="queueBlocked" class="queue-blocked hidden" role="alert">
+          <div class="queue-blocked-mark" aria-hidden="true">暂停</div>
+          <div>
+            <p class="eyebrow">安全闸门已关闭</p>
+            <h2>今天先不要按队列联系</h2>
+            <p id="queueBlockedSummary">聊天采集或快照状态不满足要求，系统不会生成可用建议。</p>
+            <div id="queueBlockReasons" class="reason-list"></div>
+          </div>
+        </div>
+
+        <div class="queue-overview" id="queueOverview" aria-label="今日行动概览">
+          <article class="queue-metric urgent"><span>立即回复</span><strong id="replyNowCount">—</strong><small>未解决入站</small></article>
+          <article class="queue-metric"><span>今日跟进</span><strong id="proactiveCount">—</strong><small>每日最多 20 人</small></article>
+          <article class="queue-metric paused"><span>暂不联系</span><strong id="suppressedCount">—</strong><small>安全规则拦截</small></article>
+          <article class="queue-freshness"><span class="freshness-signal"></span><div><small>数据新鲜度</small><strong id="queueFreshness">检查中</strong><em id="queueGeneratedAt">—</em></div></article>
+        </div>
+
+        <div class="action-workspace">
+          <div class="queue-lanes">
+            <section class="queue-lane lane-reply" aria-labelledby="replyNowHeading">
+              <header><div><p>01 · 先处理</p><h2 id="replyNowHeading">立即回复</h2></div><span id="replyNowBadge">0</span></header>
+              <p class="lane-description">客户刚发来消息且问题仍未解决。数据可用时全部展示。</p>
+              <div id="replyNowList" class="action-list loading-block">正在读取…</div>
+            </section>
+
+            <section class="queue-lane lane-proactive" aria-labelledby="proactiveHeading">
+              <header><div><p>02 · 再跟进</p><h2 id="proactiveHeading">今日主动联系</h2></div><span id="proactiveBadge">0</span></header>
+              <p class="lane-description">约定跟进或进入复购窗口；快照非实时也可生成候选，但联系前必须人工复核最新状态。</p>
+              <div id="proactiveList" class="action-list loading-block">正在读取…</div>
+            </section>
+
+            <section class="queue-lane lane-suppressed" aria-labelledby="suppressedHeading">
+              <header><div><p>03 · 先暂停</p><h2 id="suppressedHeading">暂不联系</h2></div><span id="suppressedBadge">0</span></header>
+              <p class="lane-description">刚下单、售后、明确拒绝、冷却中或数据不足的客户都留在这里说明原因。</p>
+              <div id="suppressedList" class="action-list loading-block">正在读取…</div>
+            </section>
+          </div>
+
+          <aside id="actionDetail" class="action-detail panel" aria-live="polite">
+            <div id="actionDetailEmpty" class="action-detail-empty">
+              <span aria-hidden="true">↗</span>
+              <h2>选择一位客户查看建议</h2>
+              <p>你会看到联系时间、建议动作、判断依据、待确认事实和禁止承诺。</p>
+            </div>
+            <div id="actionDetailContent" class="hidden"></div>
+          </aside>
+        </div>
+      </section>
+
+      <section class="view" id="view-profiles" aria-labelledby="pageTitle">
+        <div class="profile-snapshot-banner" role="note">
+          <div>
+            <p class="eyebrow">固定历史快照 · 仅供人工验收</p>
+            <h2>50 人销售作战卡</h2>
+            <p id="salesProfileRunSummary">历史快照截止时间：正在读取…</p>
+          </div>
+          <strong>联系前核对最新状态</strong>
+        </div>
+
+        <div class="profile-review-workspace">
+          <aside class="profile-subjects panel" aria-label="画像客户清单">
+            <form id="salesProfileFilters" class="profile-filters">
+              <label for="salesProfileStratum">客户分层
+                <select id="salesProfileStratum" name="stratum">
+                  <option value="">全部分层</option>
+                  <option value="complex_risk">复杂售后 / 拒绝</option>
+                  <option value="future_return_wait">未来回访 / 等待</option>
+                  <option value="high_frequency">高频客户</option>
+                  <option value="high_value">高客单 / 高消费</option>
+                  <option value="dormant_repeat">沉睡复购</option>
+                  <option value="control">普通对照</option>
+                </select>
+              </label>
+              <label for="salesProfileStatus">生成 / 审核状态
+                <select id="salesProfileStatus" name="status">
+                  <option value="">全部状态</option>
+                  <option value="pending">待生成</option>
+                  <option value="running">生成中</option>
+                  <option value="succeeded">已生成</option>
+                  <option value="failed">生成失败</option>
+                  <option value="unreviewed">待人工审核</option>
+                  <option value="reviewed">已人工审核</option>
+                </select>
+              </label>
+              <button class="secondary-button" type="submit">刷新清单</button>
+            </form>
+            <div id="salesProfileList" class="profile-subject-list loading-block">正在读取 50 人名单…</div>
+          </aside>
+
+          <article id="salesProfileDetail" class="profile-detail panel" aria-live="polite">
+            <div id="salesProfileDetailEmpty" class="profile-detail-empty">
+              <span aria-hidden="true">像</span>
+              <h2>选择一位客户审核画像</h2>
+              <p>右侧会展示完整作战卡、可追溯证据和五项人工评分。本页没有发消息能力。</p>
+            </div>
+
+            <div id="salesProfileDetailContent" class="hidden">
+              <header class="profile-detail-header">
+                <div>
+                  <p class="eyebrow" id="salesProfileStratumLabel">销售画像</p>
+                  <h2 id="salesProfileCustomerName">匿名客户</h2>
+                  <p id="salesProfileCustomerMeta">—</p>
+                </div>
+                <span id="salesProfileReviewBadge" class="profile-review-badge">待审核</span>
+              </header>
+
+              <div class="profile-live-warning">
+                <strong>联系前核对最新状态</strong>
+                <span id="salesProfileContactWarning">画像来自固定历史截止点，不代表客户当前状态。</span>
+              </div>
+
+              <div class="sales-card-grid" id="salesCardGrid">
+                <section class="sales-card-section"><h3>客户价值</h3><div id="profileCustomerValue"></div></section>
+                <section class="sales-card-section"><h3>商品偏好</h3><div id="profileProductPreferences"></div></section>
+                <section class="sales-card-section"><h3>时间节律</h3><div id="profileTimeRhythm"></div></section>
+                <section class="sales-card-section"><h3>购买驱动力</h3><div id="profilePurchaseDrivers"></div></section>
+                <section class="sales-card-section"><h3>历史承诺</h3><div id="profileHistoricalCommitments"></div></section>
+                <section class="sales-card-section"><h3>当前机会</h3><div id="profileCurrentOpportunity"></div></section>
+                <section class="sales-card-section"><h3>建议联系理由</h3><div id="profileContactReason"></div></section>
+                <section class="sales-card-section opening"><h3>自然开场</h3><div id="profileNaturalOpening"></div></section>
+                <section class="sales-card-section risk"><h3>风险</h3><div id="profileRisks"></div></section>
+                <section class="sales-card-section unknown"><h3>未知项</h3><div id="profileUnknowns"></div></section>
+              </div>
+
+              <details class="profile-evidence" open>
+                <summary>展开证据与确定性事实 <span id="salesProfileEvidenceCount">0 条</span></summary>
+                <div id="salesProfileFacts"></div>
+                <div id="salesProfileEvidenceList"></div>
+              </details>
+
+              <form id="salesProfileReviewForm" class="profile-review-form">
+                <div class="profile-review-heading">
+                  <div><p class="eyebrow">人工验收</p><h3>给这张作战卡评分</h3></div>
+                  <small>每项 1–5 分，保存时绑定当前卡片版本</small>
+                </div>
+                <div class="profile-score-grid">
+                  <label for="scoreFactAccuracy">事实准确度
+                    <select id="scoreFactAccuracy" name="fact_accuracy" required>
+                      <option value="" selected disabled>请选择</option><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option>
+                    </select>
+                  </label>
+                  <label for="scoreInsightUsefulness">洞察实用性
+                    <select id="scoreInsightUsefulness" name="insight_usefulness" required>
+                      <option value="" selected disabled>请选择</option><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option>
+                    </select>
+                  </label>
+                  <label for="scoreSalesRealism">销售真实感
+                    <select id="scoreSalesRealism" name="sales_realism" required>
+                      <option value="" selected disabled>请选择</option><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option>
+                    </select>
+                  </label>
+                  <label for="scoreTimingQuality">时机质量
+                    <select id="scoreTimingQuality" name="timing_quality" required>
+                      <option value="" selected disabled>请选择</option><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option>
+                    </select>
+                  </label>
+                  <label for="scoreEvidenceQuality">证据质量
+                    <select id="scoreEvidenceQuality" name="evidence_quality" required>
+                      <option value="" selected disabled>请选择</option><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option>
+                    </select>
+                  </label>
+                </div>
+                <div class="profile-review-fields">
+                  <label for="salesProfileVerdict">审核结论
+                    <select id="salesProfileVerdict" required>
+                      <option value="" selected disabled>请选择</option>
+                      <option value="approved">approved · 通过</option>
+                      <option value="edited">edited · 修改后通过</option>
+                      <option value="rejected">rejected · 拒绝</option>
+                    </select>
+                  </label>
+                  <label for="salesProfileReviewer">审核人
+                    <input id="salesProfileReviewer" maxlength="120" autocomplete="off" placeholder="operator_id" required>
+                  </label>
+                </div>
+                <label for="salesProfileCorrections">修正内容（JSON；选择 edited 时必填）
+                  <textarea id="salesProfileCorrections" rows="4" maxlength="12000" placeholder='例如：{"自然开场":"建议改为……"}'></textarea>
+                </label>
+                <label for="salesProfileNotes">审核备注
+                  <textarea id="salesProfileNotes" rows="3" maxlength="4000" placeholder="记录判断依据或需要补证的地方"></textarea>
+                </label>
+                <div class="profile-review-actions">
+                  <button id="saveSalesProfileReview" class="primary-button" type="submit">保存审核</button>
+                  <p id="salesProfileReviewStatus" role="status"></p>
+                </div>
+              </form>
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <section class="view" id="view-opportunities" aria-labelledby="pageTitle">
         <div class="stat-grid" id="opportunityStats">
           <article class="stat-card accent"><small>高机会</small><strong>—</strong><span>等待本地分析</span></article>
           <article class="stat-card"><small>中机会</small><strong>—</strong><span>等待本地分析</span></article>
@@ -130,7 +349,7 @@
         <article id="draftWorkspace" class="panel draft-panel hidden">
           <div class="panel-header compact">
             <div><p class="eyebrow">当前客户</p><h2 id="draftCustomerName">手动起草</h2><p>粘贴最新客户消息，AI 只生成待审核建议。</p></div>
-            <span class="human-badge">人工发送</span>
+            <span class="human-badge">人工确认</span>
           </div>
           <form id="draftForm">
             <label for="latestMessage">客户最新消息</label>
@@ -184,10 +403,10 @@
           <article class="panel status-card">
             <p class="eyebrow">访问保护</p>
             <h2>服务令牌</h2>
-            <p>在远程 Dashboard 使用时填入 Bearer Token。令牌只保存在当前标签页。</p>
+            <p>Dashboard 中填操作员令牌；本机工作台填 API 服务令牌。令牌只保存在当前标签页。</p>
             <form id="tokenForm" class="token-form">
               <label for="apiToken">访问令牌</label>
-              <input type="password" id="apiToken" autocomplete="off" placeholder="本机访问可留空">
+              <input type="password" id="apiToken" autocomplete="off" placeholder="请输入访问令牌">
               <div class="inline-actions">
                 <button class="primary-button" type="submit">保存并重试</button>
                 <button class="secondary-button" type="button" id="clearToken">清除</button>

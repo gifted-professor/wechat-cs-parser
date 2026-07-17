@@ -8,6 +8,7 @@ import os
 import sys
 from pathlib import Path
 
+from .action_pipeline import build_action_artifacts
 from .build import (
     apply_role_calibration_csv,
     build_database,
@@ -16,7 +17,21 @@ from .build import (
 )
 from .core import DEFAULT_HMAC_SECRET
 from .identity import import_bindings, import_feishu_order_bindings
+from .member_facts import import_member_facts
 from .orders import import_orders
+from .review_stages import (
+    STAGE_TARGETS,
+    get_review_status,
+    import_review_annotations,
+    prepare_review_batch,
+)
+from .sales_profile_generation import run_sales_profile_pilot
+from .sales_profile_pilot import (
+    DEFAULT_AS_OF_AT as DEFAULT_SALES_PROFILE_AS_OF_AT,
+    DEFAULT_MODEL as DEFAULT_SALES_PROFILE_MODEL,
+    DEFAULT_SOURCE_RUN_ID as DEFAULT_SALES_PROFILE_SOURCE_RUN_ID,
+    prepare_sales_profile_pilot,
+)
 from .store import (
     get_health,
     initialize_m0_run,
@@ -120,6 +135,91 @@ def make_parser() -> argparse.ArgumentParser:
     )
     orders.add_argument("--db", required=True)
     orders.add_argument("--orders", required=True)
+
+    member_facts = subparsers.add_parser(
+        "import-member-facts",
+        help="import versioned birthday and preference facts from a read-only member cache",
+    )
+    member_facts.add_argument("--db", required=True)
+    member_facts.add_argument("--members", required=True)
+
+    prepare_sales_profile = subparsers.add_parser(
+        "prepare-sales-profile-pilot",
+        help="freeze one deterministic sales-profile review cohort without calling a model",
+    )
+    prepare_sales_profile.add_argument("--db", required=True)
+    prepare_sales_profile.add_argument(
+        "--as-of",
+        default=DEFAULT_SALES_PROFILE_AS_OF_AT,
+        help="timezone-aware historical cutoff",
+    )
+    prepare_sales_profile.add_argument(
+        "--source-run",
+        default=DEFAULT_SALES_PROFILE_SOURCE_RUN_ID,
+        help="fixed normalized source run",
+    )
+    prepare_sales_profile.add_argument(
+        "--model", default=DEFAULT_SALES_PROFILE_MODEL
+    )
+    prepare_sales_profile.add_argument(
+        "--provider", choices=("kimi", "cliproxyapi"), default="kimi"
+    )
+    prepare_sales_profile.add_argument(
+        "--subject-count", type=int, choices=(50, 100), default=50
+    )
+    prepare_sales_profile.add_argument("--all-remaining", action="store_true")
+    prepare_sales_profile.add_argument(
+        "--exclude-run-id", action="append", default=[]
+    )
+
+    run_sales_profile = subparsers.add_parser(
+        "run-sales-profile-pilot",
+        help="generate Kimi profiles for a previously frozen review cohort",
+    )
+    run_sales_profile.add_argument("--db", required=True)
+    run_sales_profile.add_argument("--events", required=True)
+    run_sales_profile.add_argument("--accounts-config", required=True)
+    run_sales_profile.add_argument("--run-id", default="latest")
+    run_sales_profile.add_argument("--resume", action="store_true")
+    run_sales_profile.add_argument("--concurrency", type=int, default=2)
+    run_sales_profile.add_argument("--limit", type=int, choices=range(1, 101))
+
+    action_queue = subparsers.add_parser(
+        "build-action-queue",
+        help="build review-only point-in-time cards, outcomes, and action queue",
+    )
+    action_queue.add_argument("--db", required=True)
+    action_queue.add_argument(
+        "--as-of",
+        required=True,
+        help="timezone-aware decision cutoff, for example 2026-07-13T12:00:00+08:00",
+    )
+    action_queue.add_argument(
+        "--collector-status",
+        required=True,
+        help="current message collector status; only 'running' can open the queue",
+    )
+    action_queue.add_argument("--profile", help="optional local profile such as aolai1")
+
+    review_batch = subparsers.add_parser(
+        "review-batch",
+        help="prepare one deterministic outcome-blind local human review batch",
+    )
+    review_batch.add_argument("--db", required=True)
+    review_batch.add_argument("--stage", required=True, choices=tuple(STAGE_TARGETS))
+
+    review_status = subparsers.add_parser(
+        "review-status", help="show aggregate Plan 7 human review stage progress"
+    )
+    review_status.add_argument("--db", required=True)
+
+    review_annotate = subparsers.add_parser(
+        "review-annotate", help="import redacted local human review annotations"
+    )
+    review_annotate.add_argument("--db", required=True)
+    review_annotate.add_argument("--stage", required=True, choices=tuple(STAGE_TARGETS))
+    review_annotate.add_argument("--reviewer", required=True)
+    review_annotate.add_argument("--input", required=True, help="local JSON annotation file")
     return parser
 
 
@@ -218,6 +318,80 @@ def main(argv=None) -> int:
             )
         elif args.command == "import-orders":
             _print(import_orders(db_path=Path(args.db), orders_path=Path(args.orders)))
+        elif args.command == "import-member-facts":
+            _print(
+                import_member_facts(
+                    db_path=Path(args.db),
+                    source_path=Path(args.members),
+                    secret=os.environ.get(
+                        "WECHAT_CS_HMAC_SECRET", DEFAULT_HMAC_SECRET
+                    ),
+                )
+            )
+        elif args.command == "prepare-sales-profile-pilot":
+            _print(
+                prepare_sales_profile_pilot(
+                    Path(args.db),
+                    as_of_at=args.as_of,
+                    source_run_id=args.source_run,
+                    model=args.model,
+                    provider=args.provider,
+                    subject_count=args.subject_count,
+                    all_remaining=args.all_remaining,
+                    exclude_run_ids=args.exclude_run_id,
+                    secret=os.environ.get(
+                        "WECHAT_CS_HMAC_SECRET", DEFAULT_HMAC_SECRET
+                    ),
+                )
+            )
+        elif args.command == "run-sales-profile-pilot":
+            _print(
+                run_sales_profile_pilot(
+                    Path(args.db),
+                    events_path=Path(args.events),
+                    accounts_path=Path(args.accounts_config),
+                    sales_profile_run_id=args.run_id,
+                    resume=args.resume,
+                    concurrency=args.concurrency,
+                    max_subjects=args.limit,
+                    secret=os.environ.get(
+                        "WECHAT_CS_HMAC_SECRET", DEFAULT_HMAC_SECRET
+                    ),
+                )
+            )
+        elif args.command == "build-action-queue":
+            _print(
+                build_action_artifacts(
+                    Path(args.db),
+                    as_of_at=args.as_of,
+                    collector_status=args.collector_status,
+                    profile_id=args.profile,
+                    secret=os.environ.get("WECHAT_CS_HMAC_SECRET", DEFAULT_HMAC_SECRET),
+                )
+            )
+        elif args.command == "review-batch":
+            _print(prepare_review_batch(Path(args.db), args.stage))
+        elif args.command == "review-status":
+            _print(get_review_status(Path(args.db)))
+        elif args.command == "review-annotate":
+            try:
+                annotation_payload = json.loads(
+                    Path(args.input).expanduser().read_text(encoding="utf-8")
+                )
+            except (OSError, ValueError, json.JSONDecodeError) as exc:
+                raise ValueError("unable to read annotation JSON") from exc
+            if isinstance(annotation_payload, dict):
+                annotation_payload = annotation_payload.get("items")
+            if not isinstance(annotation_payload, list):
+                raise ValueError("annotation JSON must be a list or contain an items list")
+            _print(
+                import_review_annotations(
+                    Path(args.db),
+                    stage=args.stage,
+                    reviewer=args.reviewer,
+                    annotations=annotation_payload,
+                )
+            )
         else:
             parser.error("unknown command")
         return 0
